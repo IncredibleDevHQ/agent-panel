@@ -1,7 +1,3 @@
-# notes:
-#   - do not submit pull requests to add new models; this list will be updated in batches with new releases.
-#   - do not add any open-source LLMs except for the following: Mixtral, LLama-3, Gemma, Qwen, Phi-3, DeepSeek, Command-R, dbrx, Yi.
-
 - platform: openai
   # docs:
   #   - https://platform.openai.com/docs/models
