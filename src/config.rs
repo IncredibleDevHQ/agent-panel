@@ -20,6 +20,7 @@ pub struct AIGatewayConfig {
     pub model_id: Option<String>,
     /// LLM temperature
     pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
     /// Whether to save the session
     pub save_session: Option<bool>,
     /// Compress session if tokens exceed this value (>=1000)
@@ -38,6 +39,7 @@ impl Default for AIGatewayConfig {
         Self {
             model_id: None,
             temperature: None,
+            top_p: None,
             save_session: None,
             compress_threshold: 2000,
             clients: vec![ClientConfig::default()],
