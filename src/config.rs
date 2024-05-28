@@ -1,18 +1,40 @@
-use crate::client::{list_models, ClientConfig, Model, SendData};
+use crate::client::{list_models, BuiltinModels, ClientConfig, Model, SendData};
+
 use crate::input::Input;
 use crate::message::message::{Message, MessageRole};
 use crate::session::session::Session;
 use crate::utils::get_env_name;
-use std::{fs, path::Path};
+
+use lazy_static::lazy_static;
+use parking_lot::RwLock;
+
 use anyhow::{anyhow, bail, Context, Result};
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::{fs, path::Path};
 
 const CLIENTS_FIELD: &str = "clients";
 
 /// Monokai Extended
 const DARK_THEME: &[u8] = include_bytes!("./assets/monokai-extended.theme.bin");
 const LIGHT_THEME: &[u8] = include_bytes!("./assets/monokai-extended-light.theme.bin");
+
+lazy_static! {
+    pub static ref ALL_MODELS: RwLock<Vec<BuiltinModels>> = RwLock::new(Vec::new());
+}
+
+pub type GlobalConfig = Arc<RwLock<AIGatewayConfig>>;
+
+pub fn get_all_models() -> Option<Vec<BuiltinModels>> {
+    let models_guard = ALL_MODELS.read();
+
+    if models_guard.is_empty() {
+        None
+    } else {
+        Some(models_guard.clone())
+    }
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AIGatewayConfig {
@@ -51,20 +73,31 @@ impl Default for AIGatewayConfig {
 }
 
 impl AIGatewayConfig {
-    pub fn new(yaml_path: &str) -> Result<AIGatewayConfig> {
-        let file_path = Path::new(yaml_path);
-    
+    pub fn new(model_config_path: &str, client_config_path: &str) -> Result<AIGatewayConfig> {
+        let file_path = Path::new(client_config_path);
+
         // Read the YAML content directly from the given path.
         let content = fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read config file: {}", file_path.display()))?;
-    
+
         // Deserialize the YAML string into AIGatewayConfig.
         let config = AIGatewayConfig::from_yaml(&content)?;
-    
+
+        // Read the model config and update the ALL_CLIENT_MODELS
+        let models: Vec<BuiltinModels> =
+            serde_yaml::from_str(&fs::read_to_string(model_config_path).with_context(|| {
+                format!("Failed to read model config file: {}", model_config_path)
+            })?)?;
+
+        {
+            let mut models_guard = ALL_CLIENT_MODELS.write();
+            *models_guard = models;
+        }
+
         Ok(config)
     }
 
-   // create a new AI Gateway from the given YAML configuration content. 
+    // create a new AI Gateway from the given YAML configuration content.
     pub fn from_yaml(content: &str) -> Result<Self> {
         let mut config: AIGatewayConfig = serde_yaml::from_str(&content).map_err(|err| {
             let err_msg = err.to_string();
@@ -85,11 +118,11 @@ impl AIGatewayConfig {
             None => {
                 log::debug!("Model id not set, using the first available model");
                 let models = list_models(self);
-                if models.is_empty() {
+                if models.is_none() {
                     bail!("No available model");
                 }
 
-                models[0].id()
+                models.unwrap()[0].id()
             }
         };
         self.set_model(&model)?;
@@ -98,7 +131,7 @@ impl AIGatewayConfig {
 
     pub fn set_model(&mut self, value: &str) -> Result<()> {
         let models = list_models(self);
-        let model = Model::find(&models, value);
+        let model = Model::find(&models.unwrap(), value);
         match model {
             None => bail!("Invalid model '{}'", value),
             Some(model) => {
@@ -131,12 +164,12 @@ impl AIGatewayConfig {
 
     pub fn build_messages(&self, input: &Input) -> Result<Vec<Message>> {
         let mut messages = vec![];
-    
+
         // If both text and history are empty, return an error.
         if input.is_empty() && !input.history_exists() {
             bail!("Both text and history are empty.");
         }
-    
+
         // If there's non-empty text, create a new user message from the input.
         if !input.is_empty() {
             let message_text = input.to_message();
@@ -145,7 +178,7 @@ impl AIGatewayConfig {
                 messages.push(message);
             }
         }
-    
+
         // If there's history, extend the messages with it.
         if let Some(history) = input.get_history() {
             messages.extend(history);
