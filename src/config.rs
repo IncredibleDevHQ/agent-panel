@@ -21,13 +21,13 @@ const DARK_THEME: &[u8] = include_bytes!("./assets/monokai-extended.theme.bin");
 const LIGHT_THEME: &[u8] = include_bytes!("./assets/monokai-extended-light.theme.bin");
 
 lazy_static! {
-    pub static ref ALL_MODELS: RwLock<Vec<BuiltinModels>> = RwLock::new(Vec::new());
+    pub static ref ALL_CLIENT_MODELS: RwLock<Vec<BuiltinModels>> = RwLock::new(Vec::new());
 }
 
 pub type GlobalConfig = Arc<RwLock<AIGatewayConfig>>;
 
 pub fn get_all_models() -> Option<Vec<BuiltinModels>> {
-    let models_guard = ALL_MODELS.read();
+    let models_guard = ALL_CLIENT_MODELS.read();
 
     if models_guard.is_empty() {
         None
@@ -189,12 +189,13 @@ impl AIGatewayConfig {
     pub fn prepare_send_data(&self, input: &Input, stream: bool) -> Result<SendData> {
         let messages = self.build_messages(input)?;
         let temperature = self.temperature;
-
+        let top_p = self.top_p;
         self.model.max_input_tokens_limit(&messages)?;
         Ok(SendData {
             messages,
             temperature,
             stream,
+            top_p,
             functions: input.function_calls(),
         })
     }
