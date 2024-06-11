@@ -27,8 +27,6 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:8000";
 const DEFAULT_MODEL_NAME: &str = "default";
-const PLAYGROUND_HTML: &[u8] = include_bytes!("../assets/playground.html");
-const ARENA_HTML: &[u8] = include_bytes!("../assets/arena.html");
 
 type AppResponse = Response<BoxBody<Bytes, Infallible>>;
 
@@ -48,9 +46,8 @@ pub async fn run(config: GlobalConfig, addr: Option<String>) -> Result<()> {
     let server = Arc::new(Server::new(&config));
     let listener = TcpListener::bind(&addr).await?;
     let stop_server = server.run(listener).await?;
-    println!("Chat Completions API: http://{addr}/v1/chat/completions");
-    println!("LLM Playground:       http://{addr}/playground");
-    println!("LLM Arena:            http://{addr}/arena");
+    info!("Chat Completions API: http://{addr}/v1/chat/completions");
+    
     shutdown_signal().await;
     let _ = stop_server.send(());
     Ok(())
@@ -191,7 +188,7 @@ impl Server {
             .body(Full::new(Bytes::from(data.to_string())).boxed())?;
         Ok(res)
     }
-    
+
     async fn chat_completion(&self, req: hyper::Request<Incoming>) -> Result<AppResponse> {
         let req_body = req.collect().await?.to_bytes();
         let req_body: ChatCompletionReqBody = serde_json::from_slice(&req_body)
