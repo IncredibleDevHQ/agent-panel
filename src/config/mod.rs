@@ -151,11 +151,11 @@ impl Default for Config {
 pub type GlobalConfig = Arc<RwLock<Config>>;
 
 impl Config {
-    pub fn init(working_mode: WorkingMode) -> Result<Self> {
+    pub fn init() -> Result<Self> {
         let config_path = Self::config_file()?;
 
         let platform = env::var(get_env_name("platform")).ok();
-        if *IS_STDOUT_TERMINAL && platform.is_none() && !config_path.exists() {
+        if !config_path.exists() {
             create_config_file(&config_path)?;
         }
         let mut config = if platform.is_some() {
@@ -170,7 +170,6 @@ impl Config {
 
         config.function = Function::init(&Self::functions_dir()?)?;
 
-        config.working_mode = working_mode;
         config.load_roles()?;
 
         config.setup_model()?;

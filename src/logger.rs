@@ -5,7 +5,7 @@ use log::LevelFilter;
 use simplelog::{format_description, Config as LogConfig, ConfigBuilder};
 
 #[cfg(debug_assertions)]
-pub fn setup_logger(working_mode: WorkingMode) -> Result<()> {
+pub fn setup_logger() -> Result<()> {
     let config = build_config();
         simplelog::SimpleLogger::init(LevelFilter::Debug, config)?;
     Ok(())
