@@ -164,12 +164,6 @@ impl Server {
             self.chat_completion(req).await
         } else if path == "/v1/models" {
             self.list_models()
-        } else if path == "/v1/roles" {
-            self.list_roles()
-        } else if path == "/playground" || path == "/playground.html" {
-            self.playground_page()
-        } else if path == "/arena" || path == "/arena.html" {
-            self.arena_page()
         } else {
             status = StatusCode::NOT_FOUND;
             Err(anyhow!("The requested endpoint was not found."))
@@ -190,20 +184,6 @@ impl Server {
         Ok(res)
     }
 
-    fn playground_page(&self) -> Result<AppResponse> {
-        let res = Response::builder()
-            .header("Content-Type", "text/html; charset=utf-8")
-            .body(Full::new(Bytes::from(PLAYGROUND_HTML)).boxed())?;
-        Ok(res)
-    }
-
-    fn arena_page(&self) -> Result<AppResponse> {
-        let res = Response::builder()
-            .header("Content-Type", "text/html; charset=utf-8")
-            .body(Full::new(Bytes::from(ARENA_HTML)).boxed())?;
-        Ok(res)
-    }
-
     fn list_models(&self) -> Result<AppResponse> {
         let data = json!({ "data": self.models });
         let res = Response::builder()
@@ -211,15 +191,7 @@ impl Server {
             .body(Full::new(Bytes::from(data.to_string())).boxed())?;
         Ok(res)
     }
-
-    fn list_roles(&self) -> Result<AppResponse> {
-        let data = json!({ "data": self.roles });
-        let res = Response::builder()
-            .header("Content-Type", "application/json; charset=utf-8")
-            .body(Full::new(Bytes::from(data.to_string())).boxed())?;
-        Ok(res)
-    }
-
+    
     async fn chat_completion(&self, req: hyper::Request<Incoming>) -> Result<AppResponse> {
         let req_body = req.collect().await?.to_bytes();
         let req_body: ChatCompletionReqBody = serde_json::from_slice(&req_body)
