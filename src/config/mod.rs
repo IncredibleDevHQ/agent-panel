@@ -10,7 +10,7 @@ use crate::client::{
 };
 use crate::function::{Function, ToolCallResult};
 use crate::utils::{
-    format_option_value, fuzzy_match, get_env_name, light_theme_from_colorfgbg, now, render_prompt,
+    format_option_value, fuzzy_match, get_env_name, light_theme_from_colorfgbg, now, 
     set_text, AbortSignal, IS_STDOUT_TERMINAL,
 };
 
@@ -632,18 +632,6 @@ impl Config {
         if let Some(session) = self.session.as_mut() {
             session.compressing = false;
         }
-    }
-
-    pub fn render_prompt_left(&self) -> String {
-        let variables = self.generate_prompt_context();
-        let left_prompt = self.left_prompt.as_deref().unwrap_or(LEFT_PROMPT);
-        render_prompt(left_prompt, &variables)
-    }
-
-    pub fn render_prompt_right(&self) -> String {
-        let variables = self.generate_prompt_context();
-        let right_prompt = self.right_prompt.as_deref().unwrap_or(RIGHT_PROMPT);
-        render_prompt(right_prompt, &variables)
     }
 
     fn generate_prompt_context(&self) -> HashMap<&str, String> {

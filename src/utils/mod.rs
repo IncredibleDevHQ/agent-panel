@@ -2,13 +2,11 @@ mod abort_signal;
 mod clipboard;
 mod crypto;
 mod prompt_input;
-mod render_prompt;
 
 pub use self::abort_signal::*;
 pub use self::clipboard::set_text;
 pub use self::crypto::*;
 pub use self::prompt_input::*;
-pub use self::render_prompt::render_prompt;
 
 use fancy_regex::Regex;
 use is_terminal::IsTerminal;
