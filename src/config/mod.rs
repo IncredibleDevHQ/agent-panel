@@ -11,7 +11,6 @@ use crate::client::{
     OPENAI_COMPATIBLE_PLATFORMS,
 };
 use crate::function::{Function, ToolCallResult};
-use crate::rag::{Rag, TEMP_RAG_NAME};
 use crate::render::{MarkdownRender, RenderOptions};
 use crate::utils::{
     format_option_value, fuzzy_match, get_env_name, light_theme_from_colorfgbg, now, render_prompt,
@@ -98,8 +97,6 @@ pub struct Config {
     #[serde(skip)]
     pub session: Option<Session>,
     #[serde(skip)]
-    pub rag: Option<Arc<Rag>>,
-    #[serde(skip)]
     pub model: Model,
     #[serde(skip)]
     pub function: Function,
@@ -139,7 +136,6 @@ impl Default for Config {
             roles: vec![],
             role: None,
             session: None,
-            rag: None,
             model: Default::default(),
             function: Default::default(),
             working_mode: WorkingMode::Command,
@@ -380,9 +376,6 @@ impl Config {
         if self.role.is_some() {
             flags |= StateFlags::ROLE;
         }
-        if self.rag.is_some() {
-            flags |= StateFlags::RAG;
-        }
         flags
     }
 
@@ -535,21 +528,11 @@ impl Config {
         }
     }
 
-    pub fn rag_info(&self) -> Result<String> {
-        if let Some(rag) = &self.rag {
-            rag.export()
-        } else {
-            bail!("No rag")
-        }
-    }
-
     pub fn info(&self) -> Result<String> {
         if let Some(session) = &self.session {
             session.export()
         } else if let Some(role) = &self.role {
             role.export()
-        } else if let Some(rag) = &self.rag {
-            rag.export()
         } else {
             self.system_info()
         }
@@ -576,11 +559,6 @@ impl Config {
                     .collect(),
                 ".session" => self
                     .list_sessions()
-                    .into_iter()
-                    .map(|v| (v.clone(), String::new()))
-                    .collect(),
-                ".rag" => self
-                    .list_rags()
                     .into_iter()
                     .map(|v| (v.clone(), String::new()))
                     .collect(),
@@ -825,74 +803,6 @@ impl Config {
         }
     }
 
-    pub async fn use_rag(
-        config: &GlobalConfig,
-        rag: Option<&str>,
-        abort_signal: AbortSignal,
-    ) -> Result<()> {
-        if config.read().rag.is_some() {
-            bail!("Already in a rag, please run '.exit rag' first to exit the current rag.");
-        }
-        let rag = match rag {
-            None => {
-                let rag_path = Self::rag_file(TEMP_RAG_NAME)?;
-                if rag_path.exists() {
-                    remove_file(&rag_path).with_context(|| {
-                        format!("Failed to cleanup previous '{TEMP_RAG_NAME}' rag")
-                    })?;
-                }
-                Rag::init(config, TEMP_RAG_NAME, &rag_path, abort_signal).await?
-            }
-            Some(name) => {
-                let rag_path = Self::rag_file(name)?;
-                if !rag_path.exists() {
-                    Rag::init(config, name, &rag_path, abort_signal).await?
-                } else {
-                    Rag::load(config, name, &rag_path)?
-                }
-            }
-        };
-        config.write().rag = Some(Arc::new(rag));
-        Ok(())
-    }
-
-    pub fn exit_rag(&mut self) -> Result<()> {
-        self.rag.take();
-        Ok(())
-    }
-
-    pub fn list_rags(&self) -> Vec<String> {
-        let rags_dir = match Self::rags_dir() {
-            Ok(dir) => dir,
-            Err(_) => return vec![],
-        };
-        match read_dir(rags_dir) {
-            Ok(rd) => {
-                let mut names = vec![];
-                for entry in rd.flatten() {
-                    let name = entry.file_name();
-                    if let Some(name) = name.to_string_lossy().strip_suffix(".bin") {
-                        names.push(name.to_string());
-                    }
-                }
-                names.sort_unstable();
-                names
-            }
-            Err(_) => vec![],
-        }
-    }
-
-    pub fn rag_template(&self, embeddings: &str, text: &str) -> String {
-        if embeddings.is_empty() {
-            return text.to_string();
-        }
-        self.rag_template
-            .as_deref()
-            .unwrap_or(RAG_TEMPLATE)
-            .replace("__CONTEXT__", embeddings)
-            .replace("__INPUT__", text)
-    }
-
     pub fn get_render_options(&self) -> Result<RenderOptions> {
         let theme = if self.highlight {
             let theme_mode = if self.light_theme { "light" } else { "dark" };
@@ -983,9 +893,6 @@ impl Config {
             output.insert("consume_tokens", tokens.to_string());
             output.insert("consume_percent", percent.to_string());
             output.insert("user_messages_len", session.user_messages_len().to_string());
-        }
-        if let Some(rag) = &self.rag {
-            output.insert("rag", rag.name().to_string());
         }
 
         if self.highlight {

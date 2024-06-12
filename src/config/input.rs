@@ -124,23 +124,6 @@ impl Input {
         self.text = text;
     }
 
-    pub async fn maybe_embeddings(&mut self, abort_signal: AbortSignal) -> Result<()> {
-        if self.text.is_empty() {
-            return Ok(());
-        }
-        if !self.text.is_empty() {
-            let rag = self.config.read().rag.clone();
-            if let Some(rag) = rag {
-                let top_k = self.config.read().rag_top_k;
-                let embeddings = rag.search(&self.text, top_k, abort_signal).await?;
-                let text = self.config.read().rag_template(&embeddings, &self.text);
-                self.patch_text = Some(text);
-                self.rag = Some(rag.name().to_string());
-            }
-        }
-        Ok(())
-    }
-
     pub fn rag(&self) -> Option<&str> {
         self.rag.as_deref()
     }

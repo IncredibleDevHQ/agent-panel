@@ -3,9 +3,7 @@ mod client;
 mod config;
 mod function;
 mod logger;
-mod rag;
 mod render;
-mod repl;
 mod serve;
 #[macro_use]
 mod utils;
@@ -20,7 +18,6 @@ use crate::config::{
 };
 use crate::function::{eval_tool_calls, need_send_call_results};
 use crate::render::{render_error, MarkdownRender};
-use crate::repl::Repl;
 use crate::utils::{
     create_abort_signal, detect_shell, extract_block, run_command, run_spinner, Shell,
     CODE_BLOCK_RE, IS_STDOUT_TERMINAL,
