@@ -32,7 +32,8 @@ async fn main() -> Result<()> {
 
     if let Some(addr) = cli.serve {
         return serve::run(config, addr).await;
+    } else {
+        error!("Use the --serve flag to start the server");
     }
-
     Ok(())
 }
