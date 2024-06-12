@@ -1,20 +1,20 @@
-use crate::message::message::Message;
+use super::{
+    message::{Message, MessageContent},
+    EmbeddingsData,
+};
 
-use crate::utils::count_tokens;
+use crate::utils::{estimate_token_length, format_option_value};
 
 use anyhow::{bail, Result};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
-pub type TokensCountFactors = (usize, usize); // (per-messages, bias)
+const PER_MESSAGES_TOKENS: usize = 5;
+const BASIS_TOKENS: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct Model {
-    pub client_name: String,
-    pub name: String,
-    pub max_input_tokens: Option<usize>,
-    pub extra_fields: Option<serde_json::Map<String, serde_json::Value>>,
-    pub tokens_count_factors: TokensCountFactors,
-    pub capabilities: ModelCapabilities,
+    client_name: String,
+    data: ModelData,
 }
 
 impl Default for Model {
@@ -27,15 +27,21 @@ impl Model {
     pub fn new(client_name: &str, name: &str) -> Self {
         Self {
             client_name: client_name.into(),
-            name: name.into(),
-            extra_fields: None,
-            max_input_tokens: None,
-            tokens_count_factors: Default::default(),
-            capabilities: ModelCapabilities::Text,
+            data: ModelData::new(name),
         }
     }
 
-    pub fn find(models: &[Self], value: &str) -> Option<Self> {
+    pub fn from_config(client_name: &str, models: &[ModelData]) -> Vec<Self> {
+        models
+            .iter()
+            .map(|v| Model {
+                client_name: client_name.to_string(),
+                data: v.clone(),
+            })
+            .collect()
+    }
+
+    pub fn find(models: &[&Self], value: &str) -> Option<Self> {
         let mut model = None;
         let (client_name, model_name) = match value.split_once(':') {
             Some((client_name, model_name)) => {
@@ -50,16 +56,16 @@ impl Model {
         match model_name {
             Some(model_name) => {
                 if let Some(found) = models.iter().find(|v| v.id() == value) {
-                    model = Some(found.clone());
+                    model = Some((*found).clone());
                 } else if let Some(found) = models.iter().find(|v| v.client_name == client_name) {
-                    let mut found = found.clone();
-                    found.name = model_name.to_string();
+                    let mut found = (*found).clone();
+                    found.data.name = model_name.to_string();
                     model = Some(found)
                 }
             }
             None => {
                 if let Some(found) = models.iter().find(|v| v.client_name == client_name) {
-                    model = Some(found.clone());
+                    model = Some((*found).clone());
                 }
             }
         }
@@ -67,48 +73,113 @@ impl Model {
     }
 
     pub fn id(&self) -> String {
-        format!("{}:{}", self.client_name, self.name)
+        format!("{}:{}", self.client_name, self.data.name)
     }
 
-    pub fn set_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
-        self.capabilities = capabilities;
-        self
+    pub fn client_name(&self) -> &str {
+        &self.client_name
     }
 
-    pub fn set_extra_fields(
-        mut self,
-        extra_fields: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Self {
-        self.extra_fields = extra_fields;
-        self
+    pub fn name(&self) -> &str {
+        &self.data.name
     }
 
-    pub fn set_max_input_tokens(mut self, max_input_tokens: Option<usize>) -> Self {
-        match max_input_tokens {
-            None | Some(0) => self.max_input_tokens = None,
-            _ => self.max_input_tokens = max_input_tokens,
+    pub fn mode(&self) -> &str {
+        &self.data.mode
+    }
+
+    pub fn data(&self) -> &ModelData {
+        &self.data
+    }
+
+    pub fn data_mut(&mut self) -> &mut ModelData {
+        &mut self.data
+    }
+
+    pub fn description(&self) -> String {
+        let ModelData {
+            max_input_tokens,
+            max_output_tokens,
+            input_price,
+            output_price,
+            supports_vision,
+            supports_function_calling,
+            ..
+        } = &self.data;
+        let max_input_tokens = format_option_value(max_input_tokens);
+        let max_output_tokens = format_option_value(max_output_tokens);
+        let input_price = format_option_value(input_price);
+        let output_price = format_option_value(output_price);
+        let mut capabilities = vec![];
+        if *supports_vision {
+            capabilities.push('👁');
+        };
+        if *supports_function_calling {
+            capabilities.push('⚒');
+        };
+        let capabilities: String = capabilities
+            .into_iter()
+            .map(|v| format!("{v} "))
+            .collect::<Vec<String>>()
+            .join("");
+        format!(
+            "{:>8} / {:>8}  |  {:>6} / {:>6}  {:>6}",
+            max_input_tokens, max_output_tokens, input_price, output_price, capabilities
+        )
+    }
+
+    pub fn max_input_tokens(&self) -> Option<usize> {
+        self.data.max_input_tokens
+    }
+
+    pub fn max_output_tokens(&self) -> Option<isize> {
+        self.data.max_output_tokens
+    }
+
+    pub fn supports_vision(&self) -> bool {
+        self.data.supports_vision
+    }
+
+    pub fn supports_function_calling(&self) -> bool {
+        self.data.supports_function_calling
+    }
+
+    pub fn default_chunk_size(&self) -> usize {
+        self.data.default_chunk_size.unwrap_or(1000)
+    }
+
+    pub fn max_concurrent_chunks(&self) -> usize {
+        self.data.max_concurrent_chunks.unwrap_or(1)
+    }
+
+    pub fn max_tokens_param(&self) -> Option<isize> {
+        if self.data.require_max_tokens {
+            self.data.max_output_tokens
+        } else {
+            None
         }
-        self
     }
 
-    pub fn set_tokens_count_factors(mut self, tokens_count_factors: TokensCountFactors) -> Self {
-        self.tokens_count_factors = tokens_count_factors;
+    pub fn set_max_tokens(
+        &mut self,
+        max_output_tokens: Option<isize>,
+        require_max_tokens: bool,
+    ) -> &mut Self {
+        match max_output_tokens {
+            None | Some(0) => self.data.max_output_tokens = None,
+            _ => self.data.max_output_tokens = max_output_tokens,
+        }
+        self.data.require_max_tokens = require_max_tokens;
         self
     }
 
     pub fn messages_tokens(&self, messages: &[Message]) -> usize {
         messages
             .iter()
-            .map(|message| {
-                match message {
-                    Message::FunctionReturn { content, .. }
-                    | Message::PlainText { content, .. } => count_tokens(content),
-                    Message::FunctionCall { function_call, .. } => {
-                        // This placeholder returns 0, assuming no tokens to count within a function call structure.
-                        // Alternatively, you could serialize function_call to a string and count its tokens.
-                        0
-                    }
-                }
+            .map(|v| match &v.content {
+                MessageContent::Text(text) => estimate_token_length(text),
+                MessageContent::Array(_) => 0,
+                MessageContent::ToolResults(_) => 0,
             })
             .sum()
     }
@@ -119,85 +190,69 @@ impl Model {
         }
         let num_messages = messages.len();
         let message_tokens = self.messages_tokens(messages);
-        let (per_messages, _) = self.tokens_count_factors;
-
-        // Extract the role of the last message.
-        // We need to match against the Message enum to extract the role properly.
-        let last_message_role = match &messages[num_messages - 1] {
-            Message::FunctionReturn { role, .. } => role,
-            Message::FunctionCall { role, .. } => role,
-            Message::PlainText { role, .. } => role,
-        };
-
-        if last_message_role.is_user() {
-            num_messages * per_messages + message_tokens
+        if messages[num_messages - 1].role.is_user() {
+            num_messages * PER_MESSAGES_TOKENS + message_tokens
         } else {
-            (num_messages - 1) * per_messages + message_tokens
+            (num_messages - 1) * PER_MESSAGES_TOKENS + message_tokens
         }
     }
 
-    pub fn max_input_tokens_limit(&self, messages: &[Message]) -> Result<()> {
-        let (_, bias) = self.tokens_count_factors;
-        let total_tokens = self.total_tokens(messages) + bias;
-        if let Some(max_input_tokens) = self.max_input_tokens {
+    pub fn guard_max_input_tokens(&self, messages: &[Message]) -> Result<()> {
+        let total_tokens = self.total_tokens(messages) + BASIS_TOKENS;
+        if let Some(max_input_tokens) = self.data.max_input_tokens {
             if total_tokens >= max_input_tokens {
-                bail!("Exceed max input tokens limit")
+                bail!("Exceed max_input_tokens limit")
             }
         }
         Ok(())
     }
 
-    pub fn merge_extra_fields(&self, body: &mut serde_json::Value) {
-        if let (Some(body), Some(extra_fields)) = (body.as_object_mut(), &self.extra_fields) {
-            for (k, v) in extra_fields {
-                if !body.contains_key(k) {
-                    body.insert(k.clone(), v.clone());
-                }
-            }
+    pub fn guard_max_concurrent_chunks(&self, data: &EmbeddingsData) -> Result<()> {
+        if data.texts.len() > self.max_concurrent_chunks() {
+            bail!("Exceed max_concurrent_chunks limit");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelData {
+    pub name: String,
+    #[serde(default = "default_model_mode")]
+    pub mode: String,
+    pub max_input_tokens: Option<usize>,
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
+
+    // chat-only properties
+    pub max_output_tokens: Option<isize>,
+    #[serde(default)]
+    pub require_max_tokens: bool,
+    #[serde(default)]
+    pub supports_vision: bool,
+    #[serde(default)]
+    pub supports_function_calling: bool,
+
+    // embedding-only properties
+    pub default_chunk_size: Option<usize>,
+    pub max_concurrent_chunks: Option<usize>,
+}
+
+impl ModelData {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Default::default()
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ModelConfig {
-    pub name: String,
-    pub max_input_tokens: Option<usize>,
-    pub extra_fields: Option<serde_json::Map<String, serde_json::Value>>,
-    #[serde(deserialize_with = "deserialize_capabilities")]
-    #[serde(default = "default_capabilities")]
-    pub capabilities: ModelCapabilities,
+pub struct BuiltinModels {
+    pub platform: String,
+    pub models: Vec<ModelData>,
 }
 
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    pub struct ModelCapabilities: u32 {
-        const Text = 0b00000001;
-        const Vision = 0b00000010;
-    }
-}
-
-impl From<&str> for ModelCapabilities {
-    fn from(value: &str) -> Self {
-        let value = if value.is_empty() { "text" } else { value };
-        let mut output = ModelCapabilities::empty();
-        if value.contains("text") {
-            output |= ModelCapabilities::Text;
-        }
-        if value.contains("vision") {
-            output |= ModelCapabilities::Vision;
-        }
-        output
-    }
-}
-
-fn deserialize_capabilities<'de, D>(deserializer: D) -> Result<ModelCapabilities, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value: String = Deserialize::deserialize(deserializer)?;
-    Ok(value.as_str().into())
-}
-
-fn default_capabilities() -> ModelCapabilities {
-    ModelCapabilities::Text
+fn default_model_mode() -> String {
+    "chat".into()
 }

@@ -1,54 +1,28 @@
-use super::{
-    Client, ExtraConfig, Model, ModelConfig, OllamaClient, PromptType, SendData, TokensCountFactors,
-};
-use crate::message::message::{Message, MessageRole};
-use crate::{render::ReplyHandler, utils::PromptKind};
+use super::*;
 
-use anyhow::{anyhow, bail, Result};
-use async_trait::async_trait;
-use futures_util::StreamExt;
+use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const TOKENS_COUNT_FACTORS: TokensCountFactors = (5, 2);
-
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OllamaConfig {
     pub name: Option<String>,
-    pub api_base: String,
-    pub api_key: Option<String>,
-    pub chat_endpoint: Option<String>,
-    pub models: Vec<ModelConfig>,
+    pub api_base: Option<String>,
+    pub api_auth: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ModelData>,
+    pub patches: Option<ModelPatches>,
     pub extra: Option<ExtraConfig>,
 }
 
-#[async_trait]
-impl Client for OllamaClient {
-    client_common_fns!();
-
-    async fn send_message_inner(&self, client: &ReqwestClient, data: SendData) -> Result<Vec<Message>> {
-        let builder = self.request_builder(client, data)?;
-        send_message(builder).await
-    }
-
-    async fn send_message_streaming_inner(
-        &self,
-        client: &ReqwestClient,
-        handler: &mut ReplyHandler,
-        data: SendData,
-    ) -> Result<()> {
-        let builder = self.request_builder(client, data)?;
-        send_message_streaming(builder, handler).await
-    }
-}
-
 impl OllamaClient {
-    config_get_fn!(api_key, get_api_key);
+    config_get_fn!(api_base, get_api_base);
+    config_get_fn!(api_auth, get_api_auth);
 
-    pub const PROMPTS: [PromptType<'static>; 4] = [
+    pub const PROMPTS: [PromptAction<'static>; 4] = [
         ("api_base", "API Base:", true, PromptKind::String),
-        ("api_key", "API Key:", false, PromptKind::String),
+        ("api_auth", "API Auth:", false, PromptKind::String),
         ("models[].name", "Model Name:", true, PromptKind::String),
         (
             "models[].max_input_tokens",
@@ -58,81 +32,90 @@ impl OllamaClient {
         ),
     ];
 
-    pub fn list_models(local_config: &OllamaConfig) -> Vec<Model> {
-        let client_name = Self::name(local_config);
+    fn chat_completions_builder(
+        &self,
+        client: &ReqwestClient,
+        data: ChatCompletionsData,
+    ) -> Result<RequestBuilder> {
+        let api_base = self.get_api_base()?;
+        let api_auth = self.get_api_auth().ok();
 
-        local_config
-            .models
-            .iter()
-            .map(|v| {
-                Model::new(client_name, &v.name)
-                    .set_capabilities(v.capabilities)
-                    .set_max_input_tokens(v.max_input_tokens)
-                    .set_extra_fields(v.extra_fields.clone())
-                    .set_tokens_count_factors(TOKENS_COUNT_FACTORS)
-            })
-            .collect()
-    }
+        let mut body = build_chat_completions_body(data, &self.model)?;
+        self.patch_chat_completions_body(&mut body);
 
-    fn request_builder(&self, client: &ReqwestClient, data: SendData) -> Result<RequestBuilder> {
-        let api_key = self.get_api_key().ok();
+        let url = format!("{api_base}/api/chat");
 
-        let mut body = build_body(data, self.model.name.clone())?;
-
-        self.model.merge_extra_fields(&mut body);
-
-        let chat_endpoint = self.config.chat_endpoint.as_deref().unwrap_or("/api/chat");
-
-        let url = format!("{}{chat_endpoint}", self.config.api_base);
-
-        log::debug!("Ollama Request: {url} {body}");
+        debug!("Ollama Chat Completions Request: {url} {body}");
 
         let mut builder = client.post(url).json(&body);
-        if let Some(api_key) = api_key {
-            builder = builder.header("Authorization", api_key)
+        if let Some(api_auth) = api_auth {
+            builder = builder.header("Authorization", api_auth)
+        }
+
+        Ok(builder)
+    }
+
+    fn embeddings_builder(
+        &self,
+        client: &ReqwestClient,
+        data: EmbeddingsData,
+    ) -> Result<RequestBuilder> {
+        let api_base = self.get_api_base()?;
+        let api_auth = self.get_api_auth().ok();
+
+        let body = json!({
+            "model": self.model.name(),
+            "prompt": data.texts[0],
+        });
+
+        let url = format!("{api_base}/api/embeddings");
+
+        debug!("Ollama Embeddings Request: {url} {body}");
+
+        let mut builder = client.post(url).json(&body);
+        if let Some(api_auth) = api_auth {
+            builder = builder.header("Authorization", api_auth)
         }
 
         Ok(builder)
     }
 }
 
-async fn send_message(builder: RequestBuilder) -> Result<Vec<Message>> {
+impl_client_trait!(
+    OllamaClient,
+    chat_completions,
+    chat_completions_streaming,
+    embeddings
+);
+
+async fn chat_completions(builder: RequestBuilder) -> Result<ChatCompletionsOutput> {
     let res = builder.send().await?;
     let status = res.status();
-    if status != 200 {
-        let text = res.text().await?;
-        bail!("HTTP Error {status}: {text}");
+    let data = res.json().await?;
+    if !status.is_success() {
+        catch_error(&data, status.as_u16())?;
     }
-
-    let data: Value = res.json().await?;
-    let output = data["message"]["content"]
+    debug!("non-stream-data: {data}");
+    let text = data["message"]["content"]
         .as_str()
-        .ok_or_else(|| anyhow!("Invalid response data: {:?}", data))?;
-
-    // Create the PlainText message, assuming the role is 'Assistant'
-    let message = Message::PlainText {
-        role: MessageRole::Assistant,
-        content: output.to_string(),
-    };
-
-    // Wrap the message in a vector and return
-    Ok(vec![message])
+        .ok_or_else(|| anyhow!("Invalid response data: {data}"))?;
+    Ok(ChatCompletionsOutput::new(text))
 }
 
-async fn send_message_streaming(builder: RequestBuilder, handler: &mut ReplyHandler) -> Result<()> {
+async fn chat_completions_streaming(
+    builder: RequestBuilder,
+    handler: &mut SseHandler,
+) -> Result<()> {
     let res = builder.send().await?;
     let status = res.status();
-    if status != 200 {
-        let text = res.text().await?;
-        bail!("{status}, {text}");
+    if !status.is_success() {
+        let data = res.json().await?;
+        catch_error(&data, status.as_u16())?;
     } else {
-        let mut stream = res.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if chunk.is_empty() {
-                continue;
-            }
-            let data: Value = serde_json::from_slice(&chunk)?;
+        let handle = |message: &str| -> Result<()> {
+            let data: Value = serde_json::from_str(message)?;
+            debug!("stream-data: {data}");
+
             if data["done"].is_boolean() {
                 if let Some(text) = data["message"]["content"].as_str() {
                     handler.text(text)?;
@@ -140,65 +123,114 @@ async fn send_message_streaming(builder: RequestBuilder, handler: &mut ReplyHand
             } else {
                 bail!("Invalid response data: {data}")
             }
-        }
+
+            Ok(())
+        };
+
+        json_stream(res.bytes_stream(), handle).await?;
     }
+
     Ok(())
 }
 
-fn build_body(data: SendData, model: String) -> Result<Value> {
-    let SendData {
-        mut messages,
-        functions,
+async fn embeddings(builder: RequestBuilder) -> Result<EmbeddingsOutput> {
+    let res = builder.send().await?;
+    let status = res.status();
+    let data = res.json().await?;
+    if !status.is_success() {
+        catch_error(&data, status.as_u16())?;
+    }
+    let res_body: EmbeddingsResBody =
+        serde_json::from_value(data).context("Invalid request data")?;
+    let output = vec![res_body.embedding];
+    Ok(output)
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsResBody {
+    embedding: Vec<f32>,
+}
+
+fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Result<Value> {
+    let ChatCompletionsData {
+        messages,
         temperature,
+        top_p,
+        functions: _,
         stream,
     } = data;
 
+    let mut is_tool_call = false;
+    let mut network_image_urls = vec![];
+
     let messages: Vec<Value> = messages
         .into_iter()
-        .map(|message| match message {
-            Message::FunctionReturn {
-                id,
-                role,
-                name,
-                content,
-            } => {
-                json!({
+        .map(|message| {
+            let role = message.role;
+            match message.content {
+                MessageContent::Text(text) => json!({
                     "role": role,
-                    "type": "function_return",
-                    "name": name,
-                    "content": content
-                })
-            }
-            Message::FunctionCall {
-                role,
-                function_call,
-                ..
-            } => {
-                json!({
-                    "role": role,
-                    "type": "function_call",
-                    "function_call": function_call
-                })
-            }
-            Message::PlainText { role, content } => {
-                json!({
-                    "role": role,
-                    "content": content
-                })
+                    "content": text,
+                }),
+                MessageContent::Array(list) => {
+                    let mut content = vec![];
+                    let mut images = vec![];
+                    for item in list {
+                        match item {
+                            MessageContentPart::Text { text } => {
+                                content.push(text);
+                            }
+                            MessageContentPart::ImageUrl {
+                                image_url: ImageUrl { url },
+                            } => {
+                                if let Some((_, data)) = url
+                                    .strip_prefix("data:")
+                                    .and_then(|v| v.split_once(";base64,"))
+                                {
+                                    images.push(data.to_string());
+                                } else {
+                                    network_image_urls.push(url.clone());
+                                }
+                            }
+                        }
+                    }
+                    let content = content.join("\n\n");
+                    json!({ "role": role, "content": content, "images": images })
+                }
+                MessageContent::ToolResults(_) => {
+                    is_tool_call = true;
+                    json!({ "role": role })
+                }
             }
         })
         .collect();
 
+    if is_tool_call {
+        bail!("The client does not support function calling",);
+    }
+
+    if !network_image_urls.is_empty() {
+        bail!(
+            "The model does not support network images: {:?}",
+            network_image_urls
+        );
+    }
+
     let mut body = json!({
-        "model": model,
+        "model": &model.name(),
         "messages": messages,
         "stream": stream,
+        "options": {},
     });
 
-    if let Some(temperature) = temperature {
-        body["options"] = json!({
-            "temperature": temperature,
-        });
+    if let Some(v) = model.max_tokens_param() {
+        body["options"]["num_predict"] = v.into();
+    }
+    if let Some(v) = temperature {
+        body["options"]["temperature"] = v.into();
+    }
+    if let Some(v) = top_p {
+        body["options"]["top_p"] = v.into();
     }
 
     Ok(body)

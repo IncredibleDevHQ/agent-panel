@@ -1,73 +1,34 @@
-use super::vertexai::{build_body, send_message, send_message_streaming};
-use super::{Client, ExtraConfig, GeminiClient, Model, PromptType, SendData, TokensCountFactors};
+use super::vertexai::*;
+use super::*;
 
-use crate::message::message::Message;
-use crate::{render::ReplyHandler, utils::PromptKind};
-
-use anyhow::Result;
-use async_trait::async_trait;
+use anyhow::{Context, Result};
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models/";
-
-const MODELS: [(&str, usize, &str); 3] = [
-    // https://ai.google.dev/models/gemini
-    ("gemini-pro", 30720, "text"),
-    ("gemini-pro-vision", 12288, "vision"),
-    ("gemini-1.5-pro", 1048576, "text,vision"),
-];
-
-const TOKENS_COUNT_FACTORS: TokensCountFactors = (5, 2);
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GeminiConfig {
     pub name: Option<String>,
     pub api_key: Option<String>,
-    pub block_threshold: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ModelData>,
+    pub patches: Option<ModelPatches>,
     pub extra: Option<ExtraConfig>,
-}
-
-#[async_trait]
-impl Client for GeminiClient {
-    client_common_fns!();
-
-    async fn send_message_inner(&self, client: &ReqwestClient, data: SendData) -> Result<Vec<Message>> {
-        let builder = self.request_builder(client, data)?;
-        send_message(builder).await
-    }
-
-    async fn send_message_streaming_inner(
-        &self,
-        client: &ReqwestClient,
-        handler: &mut ReplyHandler,
-        data: SendData,
-    ) -> Result<()> {
-        let builder = self.request_builder(client, data)?;
-        send_message_streaming(builder, handler).await
-    }
 }
 
 impl GeminiClient {
     config_get_fn!(api_key, get_api_key);
 
-    pub const PROMPTS: [PromptType<'static>; 1] =
+    pub const PROMPTS: [PromptAction<'static>; 1] =
         [("api_key", "API Key:", true, PromptKind::String)];
 
-    pub fn list_models(local_config: &GeminiConfig) -> Vec<Model> {
-        let client_name = Self::name(local_config);
-        MODELS
-            .into_iter()
-            .map(|(name, max_input_tokens, capabilities)| {
-                Model::new(client_name, name)
-                    .set_capabilities(capabilities.into())
-                    .set_max_input_tokens(Some(max_input_tokens))
-                    .set_tokens_count_factors(TOKENS_COUNT_FACTORS)
-            })
-            .collect()
-    }
-
-    fn request_builder(&self, client: &ReqwestClient, data: SendData) -> Result<RequestBuilder> {
+    fn chat_completions_builder(
+        &self,
+        client: &ReqwestClient,
+        data: ChatCompletionsData,
+    ) -> Result<RequestBuilder> {
         let api_key = self.get_api_key()?;
 
         let func = match data.stream {
@@ -75,18 +36,75 @@ impl GeminiClient {
             false => "generateContent",
         };
 
-        let block_threshold = self.config.block_threshold.clone();
+        let mut body = gemini_build_chat_completions_body(data, &self.model)?;
+        self.patch_chat_completions_body(&mut body);
 
-        let body = build_body(data, self.model.name.clone(), block_threshold)?;
+        let url = format!("{API_BASE}{}:{}?key={}", &self.model.name(), func, api_key);
 
-        let model = self.model.name.clone();
-
-        let url = format!("{API_BASE}{}:{}?key={}", model, func, api_key);
-
-        log::debug!("Gemini Request: {url} {body}");
+        debug!("Gemini Chat Completions Request: {url} {body}");
 
         let builder = client.post(url).json(&body);
 
         Ok(builder)
     }
+
+    fn embeddings_builder(
+        &self,
+        client: &ReqwestClient,
+        data: EmbeddingsData,
+    ) -> Result<RequestBuilder> {
+        let api_key = self.get_api_key()?;
+
+        let body = json!({
+            "content": {
+                "parts": [
+                    {
+                        "text": data.texts[0],
+                    }
+                ]
+            }
+        });
+
+        let url = format!(
+            "{API_BASE}{}:embedContent?key={}",
+            &self.model.name(),
+            api_key
+        );
+
+        debug!("Gemini Embeddings Request: {url} {body}");
+
+        let builder = client.post(url).json(&body);
+
+        Ok(builder)
+    }
+}
+
+impl_client_trait!(
+    GeminiClient,
+    gemini_chat_completions,
+    gemini_chat_completions_streaming,
+    gemini_embeddings
+);
+
+async fn gemini_embeddings(builder: RequestBuilder) -> Result<EmbeddingsOutput> {
+    let res = builder.send().await?;
+    let status = res.status();
+    let data: Value = res.json().await?;
+    if !status.is_success() {
+        catch_error(&data, status.as_u16())?;
+    }
+    let res_body: EmbeddingsResBody =
+        serde_json::from_value(data).context("Invalid request data")?;
+    let output = vec![res_body.embedding.values];
+    Ok(output)
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsResBody {
+    embedding: EmbeddingsResBodyEmbedding,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsResBodyEmbedding {
+    values: Vec<f32>,
 }

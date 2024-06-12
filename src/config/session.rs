@@ -1,15 +1,14 @@
-use crate::client::Model;
-use crate::config::AIGatewayConfig;
-use crate::input::Input;
+use super::input::resolve_data_url;
+use super::{Config, Input, Model};
 
-use crate::message::message::{Message, MessageRole};
-use crate::render::MarkdownRender;
+use crate::client::{Message, MessageContent, MessageRole};
 
 use anyhow::{bail, Context, Result};
+use inquire::{Confirm, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::fs::{self, read_to_string};
+use std::fs::{self, create_dir_all, read_to_string};
 use std::path::Path;
 
 pub const TEMP_SESSION_NAME: &str = "temp";
@@ -18,14 +17,20 @@ pub const TEMP_SESSION_NAME: &str = "temp";
 pub struct Session {
     #[serde(rename(serialize = "model", deserialize = "model"))]
     model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_matcher: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     save_session: Option<bool>,
     messages: Vec<Message>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     data_urls: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     compressed_messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     compress_threshold: Option<usize>,
     #[serde(skip)]
     pub name: String,
@@ -40,13 +45,25 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(config: &AIGatewayConfig, name: &str) -> Self {
-        Self {
+    pub fn new(config: &Config, name: &str) -> Self {
+        let name = if name.is_empty() {
+            TEMP_SESSION_NAME
+        } else {
+            name
+        };
+        let save_session = if name == TEMP_SESSION_NAME {
+            None
+        } else {
+            config.save_session
+        };
+        let mut session = Self {
             model_id: config.model.id(),
             temperature: config.temperature,
-            save_session: config.save_session,
-            messages: vec![],
-            compressed_messages: vec![],
+            top_p: config.top_p,
+            function_matcher: None,
+            save_session,
+            messages: Default::default(),
+            compressed_messages: Default::default(),
             compress_threshold: None,
             data_urls: Default::default(),
             name: name.to_string(),
@@ -54,7 +71,8 @@ impl Session {
             dirty: false,
             compressing: false,
             model: config.model.clone(),
-        }
+        };
+        session
     }
 
     pub fn load(name: &str, path: &Path) -> Result<Self> {
@@ -73,12 +91,20 @@ impl Session {
         &self.name
     }
 
-    pub fn model(&self) -> &str {
+    pub fn model_id(&self) -> &str {
         &self.model_id
     }
 
     pub fn temperature(&self) -> Option<f64> {
         self.temperature
+    }
+
+    pub fn top_p(&self) -> Option<f64> {
+        self.top_p
+    }
+
+    pub fn function_matcher(&self) -> Option<&str> {
+        self.function_matcher.as_deref()
     }
 
     pub fn save_session(&self) -> Option<bool> {
@@ -95,15 +121,9 @@ impl Session {
     pub fn tokens(&self) -> usize {
         self.model.total_tokens(&self.messages)
     }
+
     pub fn user_messages_len(&self) -> usize {
-        self.messages
-            .iter()
-            .filter(|message| match message {
-                Message::FunctionReturn { role, .. } => role.is_user(),
-                Message::FunctionCall { role, .. } => role.is_user(),
-                Message::PlainText { role, .. } => role.is_user(),
-            })
-            .count()
+        self.messages.iter().filter(|v| v.role.is_user()).count()
     }
 
     pub fn export(&self) -> Result<String> {
@@ -113,17 +133,23 @@ impl Session {
         let (tokens, percent) = self.tokens_and_percent();
         let mut data = json!({
             "path": self.path,
-            "model": self.model(),
+            "model": self.model_id(),
         });
         if let Some(temperature) = self.temperature() {
             data["temperature"] = temperature.into();
+        }
+        if let Some(top_p) = self.top_p() {
+            data["top_p"] = top_p.into();
+        }
+        if let Some(function_matcher) = self.function_matcher() {
+            data["function_matcher"] = function_matcher.into();
         }
         if let Some(save_session) = self.save_session() {
             data["save_session"] = save_session.into();
         }
         data["total_tokens"] = tokens.into();
-        if let Some(conext_window) = self.model.max_input_tokens {
-            data["max_input_tokens"] = conext_window.into();
+        if let Some(max_input_tokens) = self.model.max_input_tokens() {
+            data["max_input_tokens"] = max_input_tokens.into();
         }
         if percent != 0.0 {
             data["total/max"] = format!("{}%", percent).into();
@@ -131,11 +157,11 @@ impl Session {
         data["messages"] = json!(self.messages);
 
         let output = serde_yaml::to_string(&data)
-            .with_context(|| format!("Unable to show info about session {}", &self.name))?;
+            .with_context(|| format!("Unable to show info about session '{}'", &self.name))?;
         Ok(output)
     }
 
-    pub fn info(&self, render: &mut MarkdownRender) -> Result<String> {
+    pub fn info(&self) -> Result<String> {
         let mut items = vec![];
 
         if let Some(path) = &self.path {
@@ -144,11 +170,18 @@ impl Session {
 
         items.push(("model", self.model.id()));
 
-        if let Some(temperature) = self.temperature {
+        if let Some(temperature) = self.temperature() {
             items.push(("temperature", temperature.to_string()));
         }
+        if let Some(top_p) = self.top_p() {
+            items.push(("top_p", top_p.to_string()));
+        }
 
-        if let Some(save_session) = self.save_session {
+        if let Some(function_matcher) = self.function_matcher() {
+            items.push(("function_matcher", function_matcher.into()));
+        }
+
+        if let Some(save_session) = self.save_session() {
             items.push(("save_session", save_session.to_string()));
         }
 
@@ -156,7 +189,7 @@ impl Session {
             items.push(("compress_threshold", compress_threshold.to_string()));
         }
 
-        if let Some(max_input_tokens) = self.model.max_input_tokens {
+        if let Some(max_input_tokens) = self.model.max_input_tokens() {
             items.push(("max_input_tokens", max_input_tokens.to_string()));
         }
 
@@ -165,26 +198,27 @@ impl Session {
             .map(|(name, value)| format!("{name:<20}{value}"))
             .collect();
 
-        if !self.messages.is_empty() {
+        if !self.is_empty() {
             lines.push("".into());
+            let resolve_url_fn = |url: &str| resolve_data_url(&self.data_urls, url.to_string());
 
             for message in &self.messages {
-                match message {
-                    Message::FunctionReturn { role, content, .. }
-                    | Message::PlainText { role, content, .. } => match role {
-                        MessageRole::System => lines.push(render.render(content)),
-                        MessageRole::Assistant | MessageRole::User => {
-                            lines.push(render.render(content));
-                            lines.push("".into());
+                match message.role {
+                    MessageRole::System => {
+                        lines.push(message.content.to_text().clone());
+                    }
+                    MessageRole::Assistant => {
+                        if let MessageContent::Text(text) = &message.content {
+                            lines.push(text.to_string());
                         }
-                        _ => (),
-                    },
-                    Message::FunctionCall { role, .. } => {
-                        if matches!(role, MessageRole::Assistant | MessageRole::User) {
-                            // If you want to display something specific for function calls, you can adjust here.
-                            lines.push(format!("Function call by {:?}: ", role));
-                            lines.push("".into());
-                        }
+                        lines.push("".into());
+                    }
+                    MessageRole::User => {
+                        lines.push(format!(
+                            "{}）{}",
+                            self.name,
+                            message.content.render_input(resolve_url_fn)
+                        ));
                     }
                 }
             }
@@ -196,7 +230,7 @@ impl Session {
 
     pub fn tokens_and_percent(&self) -> (usize, f32) {
         let tokens = self.tokens();
-        let max_input_tokens = self.model.max_input_tokens.unwrap_or_default();
+        let max_input_tokens = self.model.max_input_tokens().unwrap_or_default();
         let percent = if max_input_tokens == 0 {
             0.0
         } else {
@@ -213,7 +247,21 @@ impl Session {
         }
     }
 
+    pub fn set_top_p(&mut self, value: Option<f64>) {
+        if self.top_p != value {
+            self.top_p = value;
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_function_matcher(&mut self, function_matcher: Option<&str>) {
+        self.function_matcher = function_matcher.map(|v| v.to_string());
+    }
+
     pub fn set_save_session(&mut self, value: Option<bool>) {
+        if self.name == TEMP_SESSION_NAME {
+            return;
+        }
         if self.save_session != value {
             self.save_session = value;
             self.dirty = true;
@@ -227,36 +275,58 @@ impl Session {
         }
     }
 
-    pub fn set_model(&mut self, model: Model) -> Result<()> {
+    pub fn set_model(&mut self, model: &Model) {
         let model_id = model.id();
         if self.model_id != model_id {
             self.model_id = model_id;
             self.dirty = true;
         }
-        self.model = model;
-        Ok(())
+        self.model = model.clone();
     }
 
     pub fn compress(&mut self, prompt: String) {
-        // Append current messages to compressed_messages and clear current messages
         self.compressed_messages.append(&mut self.messages);
-
-        // Add a new system message using the PlainText variant
-        self.messages.push(Message::PlainText {
-            role: MessageRole::System,
-            content: prompt,
-        });
-
-        // Mark as dirty since the state has changed
+        self.messages.push(Message::new(
+            MessageRole::System,
+            MessageContent::Text(prompt),
+        ));
         self.dirty = true;
     }
 
-    pub fn save(&mut self, session_path: &Path) -> Result<()> {
+    pub fn exit(&mut self, sessions_dir: &Path, is_repl: bool) -> Result<()> {
+        let save_session = self.save_session();
+        if self.dirty && save_session != Some(false) {
+            if save_session.is_none() {
+                if !is_repl {
+                    return Ok(());
+                }
+                let ans = Confirm::new("Save session?").with_default(false).prompt()?;
+                if !ans {
+                    return Ok(());
+                }
+                while self.is_temp() {
+                    self.name = Text::new("Session name:").prompt()?;
+                }
+            }
+            self.save(sessions_dir)?;
+        }
+        Ok(())
+    }
+
+    pub fn save(&mut self, sessions_dir: &Path) -> Result<()> {
+        let mut session_path = sessions_dir.to_path_buf();
+        session_path.push(format!("{}.yaml", self.name()));
+        if !sessions_dir.exists() {
+            create_dir_all(sessions_dir).with_context(|| {
+                format!("Failed to create session_dir '{}'", sessions_dir.display())
+            })?;
+        }
+
         self.path = Some(session_path.display().to_string());
 
         let content = serde_yaml::to_string(&self)
             .with_context(|| format!("Failed to serde session {}", self.name))?;
-        fs::write(session_path, content).with_context(|| {
+        fs::write(&session_path, content).with_context(|| {
             format!(
                 "Failed to write session {} to {}",
                 self.name,
@@ -285,16 +355,16 @@ impl Session {
     }
 
     pub fn add_message(&mut self, input: &Input, output: &str) -> Result<()> {
-        self.messages.push(Message::PlainText {
-            role: MessageRole::User,
-            content: input.to_message(),
-        });
-
-        self.messages.push(Message::PlainText {
-            role: MessageRole::Assistant,
-            content: output.to_string(),
-        });
-
+        let mut need_add_msg = true;
+        if need_add_msg {
+            self.messages
+                .push(Message::new(MessageRole::User, input.message_content()));
+        }
+        self.data_urls.extend(input.data_urls());
+        self.messages.push(Message::new(
+            MessageRole::Assistant,
+            MessageContent::Text(output.to_string()),
+        ));
         self.dirty = true;
         Ok(())
     }
@@ -313,23 +383,16 @@ impl Session {
 
     pub fn build_messages(&self, input: &Input) -> Vec<Message> {
         let mut messages = self.messages.clone();
-        // Assuming need_add_msg is always true based on your snippet. If there's conditional logic, it should be implemented here.
+        let mut need_add_msg = true;
         let len = messages.len();
-
-        if len == 0 {
-            // No operation needed if there are no existing messages.
-        } else if len == 1 && self.compressed_messages.len() >= 2 {
-            // Extending the last two compressed messages if only one message is present.
+        // TODO: Review the change
+        if len == 0 && self.compressed_messages.len() >= 2 {
             messages
                 .extend(self.compressed_messages[self.compressed_messages.len() - 2..].to_vec());
         }
-
-        // Adding a new user message.
-        messages.push(Message::PlainText {
-            role: MessageRole::User,
-            content: input.to_message(),
-        });
-
+        if need_add_msg {
+            messages.push(Message::new(MessageRole::User, input.message_content()));
+        }
         messages
     }
 }

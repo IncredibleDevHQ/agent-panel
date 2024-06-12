@@ -1,296 +1,370 @@
-use super::{Client, ExtraConfig, Model, PromptType, SendData, TokensCountFactors, VertexAIClient};
-use crate::message::message::{Message, MessageRole};
-
-use crate::{render::ReplyHandler, utils::PromptKind};
+use super::access_token::*;
+use super::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use futures_util::StreamExt;
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-const MODELS: [(&str, usize, &str); 5] = [
-    // https://cloud.google.com/vertex-ai/generative-ai/docs/learn/models
-    ("gemini-1.0-pro", 24568, "text"),
-    ("gemini-1.0-pro-vision", 14336, "text,vision"),
-    ("gemini-1.0-ultra", 8192, "text"),
-    ("gemini-1.0-ultra-vision", 8192, "text,vision"),
-    ("gemini-1.5-pro", 1000000, "text"),
-];
-
-const TOKENS_COUNT_FACTORS: TokensCountFactors = (5, 2);
-
-static mut ACCESS_TOKEN: (String, i64) = (String::new(), 0); // safe under linear operation
-
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct VertexAIConfig {
     pub name: Option<String>,
-    pub api_base: Option<String>,
+    pub project_id: Option<String>,
+    pub location: Option<String>,
     pub adc_file: Option<String>,
-    pub block_threshold: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ModelData>,
+    pub patches: Option<ModelPatches>,
     pub extra: Option<ExtraConfig>,
+}
+
+impl VertexAIClient {
+    config_get_fn!(project_id, get_project_id);
+    config_get_fn!(location, get_location);
+
+    pub const PROMPTS: [PromptAction<'static>; 2] = [
+        ("project_id", "Project ID", true, PromptKind::String),
+        ("location", "Location", true, PromptKind::String),
+    ];
+
+    fn chat_completions_builder(
+        &self,
+        client: &ReqwestClient,
+        data: ChatCompletionsData,
+    ) -> Result<RequestBuilder> {
+        let project_id = self.get_project_id()?;
+        let location = self.get_location()?;
+        let access_token = get_access_token(self.name())?;
+
+        let base_url = format!("https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers");
+
+        let func = match data.stream {
+            true => "streamGenerateContent",
+            false => "generateContent",
+        };
+        let url = format!("{base_url}/google/models/{}:{func}", self.model.name());
+
+        let mut body = gemini_build_chat_completions_body(data, &self.model)?;
+        self.patch_chat_completions_body(&mut body);
+
+        debug!("VertexAI Chat Completions Request: {url} {body}");
+
+        let builder = client.post(url).bearer_auth(access_token).json(&body);
+
+        Ok(builder)
+    }
+
+    fn embeddings_builder(
+        &self,
+        client: &ReqwestClient,
+        data: EmbeddingsData,
+    ) -> Result<RequestBuilder> {
+        let project_id = self.get_project_id()?;
+        let location = self.get_location()?;
+        let access_token = get_access_token(self.name())?;
+
+        let base_url = format!("https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers");
+        let url = format!("{base_url}/google/models/{}:predict", self.model.name());
+
+        let task_type = match data.query {
+            true => "RETRIEVAL_DOCUMENT",
+            false => "QUESTION_ANSWERING",
+        };
+        let instances: Vec<_> = data
+            .texts
+            .into_iter()
+            .map(|v| json!({"task_type": task_type, "content": v}))
+            .collect();
+        let body = json!({
+            "instances": instances,
+        });
+
+        debug!("VertexAI Embeddings Request: {url} {body}");
+
+        let builder = client.post(url).bearer_auth(access_token).json(&body);
+
+        Ok(builder)
+    }
 }
 
 #[async_trait]
 impl Client for VertexAIClient {
     client_common_fns!();
 
-    async fn send_message_inner(
+    async fn chat_completions_inner(
         &self,
         client: &ReqwestClient,
-        data: SendData,
-    ) -> Result<Vec<Message>> {
-        self.prepare_access_token().await?;
-        let builder = self.request_builder(client, data)?;
-        send_message(builder).await
+        data: ChatCompletionsData,
+    ) -> Result<ChatCompletionsOutput> {
+        prepare_gcloud_access_token(client, self.name(), &self.config.adc_file).await?;
+        let builder = self.chat_completions_builder(client, data)?;
+        gemini_chat_completions(builder).await
     }
 
-    async fn send_message_streaming_inner(
+    async fn chat_completions_streaming_inner(
         &self,
         client: &ReqwestClient,
-        handler: &mut ReplyHandler,
-        data: SendData,
+        handler: &mut SseHandler,
+        data: ChatCompletionsData,
     ) -> Result<()> {
-        self.prepare_access_token().await?;
-        let builder = self.request_builder(client, data)?;
-        send_message_streaming(builder, handler).await
+        prepare_gcloud_access_token(client, self.name(), &self.config.adc_file).await?;
+        let builder = self.chat_completions_builder(client, data)?;
+        gemini_chat_completions_streaming(builder, handler).await
+    }
+
+    async fn embeddings_inner(
+        &self,
+        client: &ReqwestClient,
+        data: EmbeddingsData,
+    ) -> Result<Vec<Vec<f32>>> {
+        prepare_gcloud_access_token(client, self.name(), &self.config.adc_file).await?;
+        let builder = self.embeddings_builder(client, data)?;
+        embeddings(builder).await
     }
 }
 
-impl VertexAIClient {
-    config_get_fn!(api_base, get_api_base);
-
-    pub const PROMPTS: [PromptType<'static>; 1] =
-        [("api_base", "API Base:", true, PromptKind::String)];
-
-    pub fn list_models(local_config: &VertexAIConfig) -> Vec<Model> {
-        let client_name = Self::name(local_config);
-        MODELS
-            .into_iter()
-            .map(|(name, max_input_tokens, capabilities)| {
-                Model::new(client_name, name)
-                    .set_capabilities(capabilities.into())
-                    .set_max_input_tokens(Some(max_input_tokens))
-                    .set_tokens_count_factors(TOKENS_COUNT_FACTORS)
-            })
-            .collect()
-    }
-
-    fn request_builder(&self, client: &ReqwestClient, data: SendData) -> Result<RequestBuilder> {
-        let api_base = self.get_api_base()?;
-
-        let func = match data.stream {
-            true => "streamGenerateContent",
-            false => "generateContent",
-        };
-
-        let block_threshold = self.config.block_threshold.clone();
-
-        let body = build_body(data, self.model.name.clone(), block_threshold)?;
-
-        let model = self.model.name.clone();
-
-        let url = format!("{api_base}/{}:{}", model, func);
-
-        log::debug!("VertexAI Request: {url} {body}");
-
-        let builder = client
-            .post(url)
-            .bearer_auth(unsafe { &ACCESS_TOKEN.0 })
-            .json(&body);
-
-        Ok(builder)
-    }
-
-    async fn prepare_access_token(&self) -> Result<()> {
-        if unsafe { ACCESS_TOKEN.0.is_empty() || Utc::now().timestamp() > ACCESS_TOKEN.1 } {
-            let client = self.build_client()?;
-            let (token, expires_in) = fetch_access_token(&client, &self.config.adc_file)
-                .await
-                .with_context(|| "Failed to fetch access token")?;
-            let expires_at = Utc::now()
-                + Duration::try_seconds(expires_in)
-                    .ok_or_else(|| anyhow!("Failed to parse expires_in of access_token"))?;
-            unsafe { ACCESS_TOKEN = (token, expires_at.timestamp()) };
-        }
-        Ok(())
-    }
-}
-
-pub(crate) async fn send_message(builder: RequestBuilder) -> Result<Vec<Message>> {
+pub async fn gemini_chat_completions(builder: RequestBuilder) -> Result<ChatCompletionsOutput> {
     let res = builder.send().await?;
     let status = res.status();
     let data: Value = res.json().await?;
-    if status != 200 {
-        check_error(&data)?;
+    if !status.is_success() {
+        catch_error(&data, status.as_u16())?;
     }
-    let output = data["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .ok_or_else(|| anyhow!("Invalid response data: {data}"))?;
-
-    // Return the response as Vec<Message> type
-    let message = Message::PlainText {
-        role: MessageRole::Assistant,
-        content: output.to_string(),
-    };
-    Ok(vec![message])
+    debug!("non-stream-data: {data}");
+    gemini_extract_chat_completions_text(&data)
 }
 
-pub(crate) async fn send_message_streaming(
+pub async fn gemini_chat_completions_streaming(
     builder: RequestBuilder,
-    handler: &mut ReplyHandler,
+    handler: &mut SseHandler,
 ) -> Result<()> {
     let res = builder.send().await?;
-    if res.status() != 200 {
+    let status = res.status();
+    if !status.is_success() {
         let data: Value = res.json().await?;
-        check_error(&data)?;
+        catch_error(&data, status.as_u16())?;
     } else {
-        let mut buffer = vec![];
-        let mut cursor = 0;
-        let mut start = 0;
-        let mut balances = vec![];
-        let mut quoting = false;
-        let mut stream = res.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let chunk = std::str::from_utf8(&chunk)?;
-            buffer.extend(chunk.chars());
-            for i in cursor..buffer.len() {
-                let ch = buffer[i];
-                if quoting {
-                    if ch == '"' && buffer[i - 1] != '\\' {
-                        quoting = false;
-                    }
-                    continue;
+        let handle = |value: &str| -> Result<()> {
+            let data: Value = serde_json::from_str(value)?;
+            debug!("stream-data: {data}");
+            if let Some(text) = data["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+                if !text.is_empty() {
+                    handler.text(text)?;
                 }
-                match ch {
-                    '"' => quoting = true,
-                    '{' => {
-                        if balances.is_empty() {
-                            start = i;
-                        }
-                        balances.push(ch);
+            } else if let Some("SAFETY") = data["promptFeedback"]["blockReason"]
+                .as_str()
+                .or_else(|| data["candidates"][0]["finishReason"].as_str())
+            {
+                bail!("Content Blocked")
+            } else if let Some(parts) = data["candidates"][0]["content"]["parts"].as_array() {
+                for part in parts {
+                    if let (Some(name), Some(args)) = (
+                        part["functionCall"]["name"].as_str(),
+                        part["functionCall"]["args"].as_object(),
+                    ) {
+                        handler.tool_call(ToolCall::new(name.to_string(), json!(args), None))?;
                     }
-                    '[' => {
-                        if start != 0 {
-                            balances.push(ch);
-                        }
-                    }
-                    '}' => {
-                        balances.pop();
-                        if balances.is_empty() {
-                            let value: String = buffer[start..=i].iter().collect();
-                            let value: Value = serde_json::from_str(&value)?;
-                            if let Some(text) =
-                                value["candidates"][0]["content"]["parts"][0]["text"].as_str()
-                            {
-                                handler.text(text)?;
-                            } else {
-                                bail!("Invalid response data: {value}")
-                            }
-                        }
-                    }
-                    ']' => {
-                        balances.pop();
-                    }
-                    _ => {}
                 }
             }
-            cursor = buffer.len();
-        }
+
+            Ok(())
+        };
+        json_stream(res.bytes_stream(), handle).await?;
     }
     Ok(())
 }
 
-fn check_error(data: &Value) -> Result<()> {
-    if let Some((Some(status), Some(message))) = data[0]["error"].as_object().map(|v| {
-        (
-            v.get("status").and_then(|v| v.as_str()),
-            v.get("message").and_then(|v| v.as_str()),
-        )
-    }) {
-        if status == "UNAUTHENTICATED" {
-            unsafe { ACCESS_TOKEN = (String::new(), 0) }
-        }
-        bail!("{status}: {message}")
-    } else {
-        bail!("Error {}", data);
+async fn embeddings(builder: RequestBuilder) -> Result<EmbeddingsOutput> {
+    let res = builder.send().await?;
+    let status = res.status();
+    let data: Value = res.json().await?;
+    if !status.is_success() {
+        catch_error(&data, status.as_u16())?;
     }
+    let res_body: EmbeddingsResBody =
+        serde_json::from_value(data).context("Invalid request data")?;
+    let output = res_body
+        .predictions
+        .into_iter()
+        .map(|v| v.embeddings.values)
+        .collect();
+    Ok(output)
 }
 
-pub(crate) fn build_body(
-    data: SendData,
-    _model: String,
-    block_threshold: Option<String>,
+#[derive(Deserialize)]
+struct EmbeddingsResBody {
+    predictions: Vec<EmbeddingsResBodyPrediction>,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsResBodyPrediction {
+    embeddings: EmbeddingsResBodyPredictionEmbeddings,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsResBodyPredictionEmbeddings {
+    values: Vec<f32>,
+}
+
+fn gemini_extract_chat_completions_text(data: &Value) -> Result<ChatCompletionsOutput> {
+    let text = data["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+
+    let mut tool_calls = vec![];
+    if let Some(parts) = data["candidates"][0]["content"]["parts"].as_array() {
+        tool_calls = parts
+            .iter()
+            .filter_map(|part| {
+                if let (Some(name), Some(args)) = (
+                    part["functionCall"]["name"].as_str(),
+                    part["functionCall"]["args"].as_object(),
+                ) {
+                    Some(ToolCall::new(name.to_string(), json!(args), None))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    if text.is_empty() && tool_calls.is_empty() {
+        if let Some("SAFETY") = data["promptFeedback"]["blockReason"]
+            .as_str()
+            .or_else(|| data["candidates"][0]["finishReason"].as_str())
+        {
+            bail!("Content Blocked")
+        } else {
+            bail!("Invalid response data: {data}");
+        }
+    }
+    let output = ChatCompletionsOutput {
+        text: text.to_string(),
+        tool_calls,
+        id: None,
+        input_tokens: data["usageMetadata"]["promptTokenCount"].as_u64(),
+        output_tokens: data["usageMetadata"]["candidatesTokenCount"].as_u64(),
+    };
+    Ok(output)
+}
+
+pub fn gemini_build_chat_completions_body(
+    data: ChatCompletionsData,
+    model: &Model,
 ) -> Result<Value> {
-    let SendData {
-        messages,
+    let ChatCompletionsData {
+        mut messages,
         temperature,
-        ..
+        top_p,
+        functions,
+        stream: _,
     } = data;
 
+    patch_system_message(&mut messages);
+
+    let mut network_image_urls = vec![];
     let contents: Vec<Value> = messages
         .into_iter()
-        .map(|message| {
-            let (role, text) = match message {
-                Message::FunctionReturn { role, content, .. }
-                | Message::PlainText { role, content } => {
-                    let role_str = match role {
-                        MessageRole::User => "user",
-                        _ => "model",
-                    };
-                    (role_str, content)
-                }
-                Message::FunctionCall {
-                    role,
-                    function_call,
-                    ..
-                } => {
-                    let role_str = match role {
-                        MessageRole::User => "user",
-                        _ => "model",
-                    };
-                    // Check if the function name is present and construct the description accordingly.
-                    let func_name = function_call
-                        .name
-                        .clone();
-                    
-                    let call_desc = format!(
-                        "Function call: {} with arguments: {}",
-                        func_name, function_call.arguments
-                    );
-                    (role_str, call_desc)
-                }
+        .flat_map(|message| {
+            let Message { role, content } = message;
+            let role = match role {
+                MessageRole::User => "user",
+                _ => "model",
             };
-
-            json!({
-                "role": role,
-                "parts": [{ "text": text }]
-            })
+               match content {
+                    MessageContent::Text(text) => vec![json!({
+                        "role": role,
+                        "parts": [{ "text": text }]
+                    })],
+                    MessageContent::Array(list) => {
+                        let parts: Vec<Value> = list
+                            .into_iter()
+                            .map(|item| match item {
+                                MessageContentPart::Text { text } => json!({"text": text}),
+                                MessageContentPart::ImageUrl { image_url: ImageUrl { url } } => {
+                                    if let Some((mime_type, data)) = url.strip_prefix("data:").and_then(|v| v.split_once(";base64,")) {
+                                        json!({ "inline_data": { "mime_type": mime_type, "data": data } })
+                                    } else {
+                                        network_image_urls.push(url.clone());
+                                        json!({ "url": url })
+                                    }
+                                },
+                            })
+                            .collect();
+                        vec![json!({ "role": role, "parts": parts })]
+                    },
+                    MessageContent::ToolResults((tool_call_results, _)) => {
+                        let function_call_parts: Vec<Value> = tool_call_results.iter().map(|tool_call_result| {
+                            json!({
+                                "functionCall": {
+                                    "name": tool_call_result.call.name,
+                                    "args": tool_call_result.call.arguments,
+                                }
+                            })
+                        }).collect();
+                        let function_response_parts: Vec<Value> = tool_call_results.into_iter().map(|tool_call_result| {
+                            json!({
+                                "functionResponse": {
+                                    "name": tool_call_result.call.name,
+                                    "response": {
+                                        "name": tool_call_result.call.name,
+                                        "content": tool_call_result.output,
+                                    }
+                                }
+                            })
+                        }).collect();
+                        vec![
+                            json!({ "role": "model", "parts": function_call_parts }),
+                            json!({ "role": "function", "parts": function_response_parts }),
+                        ]
+                    }
+                }
         })
         .collect();
 
-    let mut body = json!({ "contents": contents });
-
-    if let Some(block_threshold) = block_threshold {
-        body["safetySettings"] = json!([
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": block_threshold},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": block_threshold},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": block_threshold},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": block_threshold}
-        ]);
+    if !network_image_urls.is_empty() {
+        bail!(
+            "The model does not support network images: {:?}",
+            network_image_urls
+        );
     }
 
-    if let Some(temperature) = temperature {
-        body["generationConfig"] = json!({
-            "temperature": temperature,
-        });
+    let mut body = json!({ "contents": contents, "generationConfig": {} });
+
+    if let Some(v) = model.max_tokens_param() {
+        body["generationConfig"]["maxOutputTokens"] = v.into();
+    }
+    if let Some(v) = temperature {
+        body["generationConfig"]["temperature"] = v.into();
+    }
+    if let Some(v) = top_p {
+        body["generationConfig"]["topP"] = v.into();
+    }
+
+    if let Some(functions) = functions {
+        body["tools"] = json!([{ "functionDeclarations": *functions }]);
     }
 
     Ok(body)
+}
+
+pub async fn prepare_gcloud_access_token(
+    client: &reqwest::Client,
+    client_name: &str,
+    adc_file: &Option<String>,
+) -> Result<()> {
+    if !is_valid_access_token(client_name) {
+        let (token, expires_in) = fetch_access_token(client, adc_file)
+            .await
+            .with_context(|| "Failed to fetch access token")?;
+        let expires_at = Utc::now()
+            + Duration::try_seconds(expires_in)
+                .ok_or_else(|| anyhow!("Failed to parse expires_in of access_token"))?;
+        set_access_token(client_name, token, expires_at.timestamp())
+    }
+    Ok(())
 }
 
 async fn fetch_access_token(
@@ -313,7 +387,7 @@ async fn fetch_access_token(
     } else if let Some(err_msg) = value["error_description"].as_str() {
         bail!("{err_msg}")
     } else {
-        bail!("Invalid response data")
+        bail!("Invalid response data: {value}")
     }
 }
 
