@@ -57,7 +57,6 @@ struct Server {
     clients: Vec<ClientConfig>,
     model: Model,
     models: Vec<Value>,
-    roles: Vec<Role>,
 }
 
 impl Server {
@@ -104,7 +103,6 @@ impl Server {
         Self {
             clients,
             model,
-            roles,
             models,
         }
     }
