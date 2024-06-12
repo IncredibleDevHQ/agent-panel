@@ -30,7 +30,6 @@ use anyhow::{bail, Result};
 use async_recursion::async_recursion;
 use clap::Parser;
 use inquire::{Select, Text};
-use is_terminal::IsTerminal;
 use parking_lot::RwLock;
 use std::io::{stderr, stdin, Read};
 use std::process;
@@ -39,8 +38,6 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let text = cli.text();
-    let file = &cli.file;
     
     crate::logger::setup_logger()?;
     let config = Arc::new(RwLock::new(Config::init()?));
