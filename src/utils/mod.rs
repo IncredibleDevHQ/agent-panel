@@ -1,13 +1,11 @@
 mod abort_signal;
 mod clipboard;
-mod command;
 mod crypto;
 mod prompt_input;
 mod render_prompt;
 
 pub use self::abort_signal::*;
 pub use self::clipboard::set_text;
-pub use self::command::*;
 pub use self::crypto::*;
 pub use self::prompt_input::*;
 pub use self::render_prompt::render_prompt;
@@ -88,22 +86,6 @@ pub fn light_theme_from_colorfgbg(colorfgbg: &str) -> Option<bool> {
     Some(light)
 }
 
-pub fn extract_block(input: &str) -> String {
-    let output: String = CODE_BLOCK_RE
-        .captures_iter(input)
-        .filter_map(|m| {
-            m.ok()
-                .and_then(|cap| cap.get(1))
-                .map(|m| String::from(m.as_str()))
-        })
-        .collect();
-    if output.is_empty() {
-        input.trim().to_string()
-    } else {
-        output.trim().to_string()
-    }
-}
-
 pub fn format_option_value<T>(value: &Option<T>) -> String
 where
     T: std::fmt::Display,
@@ -129,24 +111,6 @@ pub fn fuzzy_match(text: &str, pattern: &str) -> bool {
     }
 
     pattern_index == pattern_chars.len()
-}
-
-pub fn error_text(input: &str) -> String {
-    nu_ansi_term::Style::new()
-        .fg(nu_ansi_term::Color::Red)
-        .paint(input)
-        .to_string()
-}
-
-pub fn warning_text(input: &str) -> String {
-    nu_ansi_term::Style::new()
-        .fg(nu_ansi_term::Color::Yellow)
-        .paint(input)
-        .to_string()
-}
-
-pub fn dimmed_text(input: &str) -> String {
-    nu_ansi_term::Style::new().dimmed().paint(input).to_string()
 }
 
 pub fn indent_text(text: &str, spaces: usize) -> String {

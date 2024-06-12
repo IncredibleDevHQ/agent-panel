@@ -1,9 +1,6 @@
 use crate::{
     config::GlobalConfig,
-    utils::{
-        dimmed_text, get_env_bool, indent_text, run_command, run_command_with_output, warning_text,
-        IS_STDOUT_TERMINAL,
-    },
+    utils::{get_env_bool, indent_text, IS_STDOUT_TERMINAL},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -12,12 +9,11 @@ use indexmap::{IndexMap, IndexSet};
 use inquire::{validator::Validation, Text};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs,
     path::Path,
-    sync::mpsc::channel,
 };
 use threadpool::ThreadPool;
 
@@ -29,41 +25,6 @@ lazy_static! {
 }
 
 pub type ToolResults = (Vec<ToolCallResult>, String);
-
-pub fn eval_tool_calls(
-    config: &GlobalConfig,
-    mut calls: Vec<ToolCall>,
-) -> Result<Vec<ToolCallResult>> {
-    let mut output = vec![];
-    if calls.is_empty() {
-        return Ok(output);
-    }
-    calls = ToolCall::dedup(calls);
-    let parallel = calls.len() > 1 && calls.iter().all(|v| !v.is_execute());
-    if parallel {
-        let (tx, rx) = channel();
-        let calls_len = calls.len();
-        for (index, call) in calls.into_iter().enumerate() {
-            let tx = tx.clone();
-            let config = config.clone();
-            THREAD_POOL.execute(move || {
-                let result = call.eval(&config);
-                let _ = tx.send((index, call, result));
-            });
-        }
-        let mut list: Vec<(usize, ToolCall, Result<Value>)> = rx.iter().take(calls_len).collect();
-        list.sort_by_key(|v| v.0);
-        for (_, call, result) in list {
-            output.push(ToolCallResult::new(call, result?));
-        }
-    } else {
-        for call in calls {
-            let result = call.eval(config)?;
-            output.push(ToolCallResult::new(call, result));
-        }
-    }
-    Ok(output)
-}
 
 pub fn need_send_call_results(arr: &[ToolCallResult]) -> bool {
     arr.iter().any(|v| !v.output.is_null())
@@ -202,111 +163,6 @@ impl ToolCall {
             arguments,
             id,
         }
-    }
-
-    pub fn eval(&self, config: &GlobalConfig) -> Result<Value> {
-        let name = self.name.clone();
-        if !config.read().function.names.contains(&name) {
-            bail!("Unexpected call: {name} {}", self.arguments);
-        }
-        let arguments = if self.arguments.is_object() {
-            self.arguments.clone()
-        } else if let Some(arguments) = self.arguments.as_str() {
-            let args: Value = serde_json::from_str(arguments)
-                .map_err(|_| anyhow!("The {name} call has invalid arguments: {arguments}"))?;
-            args
-        } else {
-            bail!("The {name} call has invalid arguments: {}", self.arguments);
-        };
-
-        let arguments = arguments.to_string();
-        let prompt = format!("Call {name} '{arguments}'",);
-
-        let mut envs = HashMap::new();
-        if let Some(env_path) = config.read().function.env_path.clone() {
-            envs.insert("PATH".into(), env_path);
-        };
-        #[cfg(windows)]
-        let name = polyfill_cmd_name(&name, &config.read().function.bin_dir);
-
-        let output = if self.is_execute() {
-            if *IS_STDOUT_TERMINAL {
-                println!("{prompt}");
-                let answer = Text::new("[1] Run, [2] Run & Retrieve, [3] Skip:")
-                    .with_default("1")
-                    .with_validator(|input: &str| match matches!(input, "1" | "2" | "3") {
-                        true => Ok(Validation::Valid),
-                        false => Ok(Validation::Invalid(
-                            "Invalid input, please select 1, 2 or 3".into(),
-                        )),
-                    })
-                    .prompt()?;
-                match answer.as_str() {
-                    "1" => {
-                        let exit_code = run_command(&name, &[arguments], Some(envs))?;
-                        if exit_code != 0 {
-                            bail!("Exit {exit_code}");
-                        }
-                        Value::Null
-                    }
-                    "2" => run_and_retrieve(&name, &arguments, envs, &prompt)?,
-                    _ => Value::Null,
-                }
-            } else {
-                println!("Skipped {prompt}");
-                Value::Null
-            }
-        } else {
-            println!("{}", dimmed_text(&prompt));
-            run_and_retrieve(&name, &arguments, envs, &prompt)?
-        };
-
-        Ok(output)
-    }
-
-    pub fn is_execute(&self) -> bool {
-        if get_env_bool("function_auto_execute") {
-            false
-        } else {
-            self.name.starts_with("may_") || self.name.contains("__may_")
-        }
-    }
-}
-
-fn run_and_retrieve(
-    name: &str,
-    arguments: &str,
-    envs: HashMap<String, String>,
-    prompt: &str,
-) -> Result<Value> {
-    let (success, stdout, stderr) = run_command_with_output(name, &[arguments], Some(envs))?;
-
-    if success {
-        if !stderr.is_empty() {
-            eprintln!(
-                "{}",
-                warning_text(&format!("{prompt}:\n{}", indent_text(&stderr, 4)))
-            );
-        }
-        let value = if !stdout.is_empty() {
-            serde_json::from_str(&stdout)
-                .ok()
-                .unwrap_or_else(|| json!({"output": stdout}))
-        } else {
-            Value::Null
-        };
-        Ok(value)
-    } else {
-        let err = if stderr.is_empty() {
-            if stdout.is_empty() {
-                "Something wrong"
-            } else {
-                &stdout
-            }
-        } else {
-            &stderr
-        };
-        bail!("{}", &format!("{prompt}:\n{}", indent_text(err, 4)));
     }
 }
 

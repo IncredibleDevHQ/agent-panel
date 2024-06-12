@@ -5,7 +5,7 @@ use crate::client::{
     MessageContentPart, MessageRole, Model,
 };
 use crate::function::{ToolCallResult, ToolResults};
-use crate::utils::{base64_encode, sha256, warning_text, IS_STDOUT_TERMINAL};
+use crate::utils::{base64_encode, sha256};
 
 use anyhow::{bail, Context, Result};
 use fancy_regex::Regex;
@@ -187,9 +187,6 @@ impl Input {
                 functions = config.function.select(function_matcher);
                 if !model.supports_function_calling() {
                     functions = None;
-                    if *IS_STDOUT_TERMINAL {
-                        eprintln!("{}", warning_text("WARNING: the role or session includes functions, but the model or client does not support function calling."));
-                    }
                 }
             }
         };
