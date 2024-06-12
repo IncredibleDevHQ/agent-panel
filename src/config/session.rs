@@ -2,7 +2,6 @@ use super::input::resolve_data_url;
 use super::{Config, Input, Model};
 
 use crate::client::{Message, MessageContent, MessageRole};
-use crate::render::MarkdownRender;
 
 use anyhow::{bail, Context, Result};
 use inquire::{Confirm, Text};
@@ -162,7 +161,7 @@ impl Session {
         Ok(output)
     }
 
-    pub fn info(&self, render: &mut MarkdownRender) -> Result<String> {
+    pub fn info(&self) -> Result<String> {
         let mut items = vec![];
 
         if let Some(path) = &self.path {
@@ -206,11 +205,11 @@ impl Session {
             for message in &self.messages {
                 match message.role {
                     MessageRole::System => {
-                        lines.push(render.render(&message.content.render_input(resolve_url_fn)));
+                        lines.push(message.content.to_text().clone());
                     }
                     MessageRole::Assistant => {
                         if let MessageContent::Text(text) = &message.content {
-                            lines.push(render.render(text));
+                            lines.push(text.to_string());
                         }
                         lines.push("".into());
                     }

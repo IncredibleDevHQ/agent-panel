@@ -2,8 +2,7 @@ use super::*;
 
 use crate::{
     config::{GlobalConfig, Input},
-    function::{eval_tool_calls, FunctionDeclaration, ToolCall, ToolCallResult},
-    render::{render_error, render_stream},
+    function::{ FunctionDeclaration, ToolCall},
     utils::{
         prompt_input_integer, prompt_input_string, tokenize, watch_abort_signal, AbortSignal,
         PromptKind,
@@ -19,7 +18,6 @@ use reqwest::{Client as ReqwestClient, ClientBuilder, Proxy, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{env, future::Future, time::Duration};
-use tokio::sync::mpsc::unbounded_channel;
 
 const MODELS_YAML: &str = include_str!("../../models.yaml");
 
@@ -158,10 +156,6 @@ macro_rules! register_client {
 
         pub fn list_chat_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
             list_models(config).into_iter().filter(|v| v.mode() == "chat").collect()
-        }
-
-        pub fn list_embedding_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.mode() == "embedding").collect()
         }
     };
 }
@@ -513,39 +507,6 @@ pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(St
             set_client_config_values(&prompts, &mut model, &mut config)?;
             let clients = json!(vec![config]);
             Ok(Some((model, clients)))
-        }
-    }
-}
-
-pub async fn send_stream(
-    input: &Input,
-    client: &dyn Client,
-    config: &GlobalConfig,
-    abort: AbortSignal,
-) -> Result<(String, Vec<ToolCallResult>)> {
-    let (tx, rx) = unbounded_channel();
-    let mut handler = SseHandler::new(tx, abort.clone());
-
-    let (send_ret, rend_ret) = tokio::join!(
-        client.chat_completions_streaming(input, &mut handler),
-        render_stream(rx, config, abort.clone()),
-    );
-    if let Err(err) = rend_ret {
-        render_error(err, config.read().highlight);
-    }
-    let (output, calls) = handler.take();
-    match send_ret {
-        Ok(_) => {
-            if !output.is_empty() && !output.ends_with('\n') {
-                println!();
-            }
-            Ok((output, eval_tool_calls(config, calls)?))
-        }
-        Err(err) => {
-            if !output.is_empty() {
-                println!();
-            }
-            Err(err)
         }
     }
 }
