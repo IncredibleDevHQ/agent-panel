@@ -1,9 +1,7 @@
 mod input;
-mod role;
 mod session;
 
 pub use self::input::{Input, InputContext};
-pub use self::role::{Role, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE};
 use self::session::{Session, TEMP_SESSION_NAME};
 
 use crate::client::{
@@ -91,10 +89,6 @@ pub struct Config {
     pub right_prompt: Option<String>,
     pub clients: Vec<ClientConfig>,
     #[serde(skip)]
-    pub roles: Vec<Role>,
-    #[serde(skip)]
-    pub role: Option<Role>,
-    #[serde(skip)]
     pub session: Option<Session>,
     #[serde(skip)]
     pub model: Model,
@@ -133,8 +127,6 @@ impl Default for Config {
             left_prompt: None,
             right_prompt: None,
             clients: vec![],
-            roles: vec![],
-            role: None,
             session: None,
             model: Default::default(),
             function: Default::default(),
@@ -166,8 +158,6 @@ impl Config {
 
         config.function = Function::init(&Self::functions_dir()?)?;
 
-        config.load_roles()?;
-
         config.setup_model()?;
         config.setup_highlight();
         config.setup_light_theme()?;
@@ -182,11 +172,6 @@ impl Config {
         }
         let err_msg = || format!("Invalid prelude '{}", prelude);
         match prelude.split_once(':') {
-            Some(("role", name)) => {
-                if self.role.is_none() && self.session.is_none() {
-                    self.use_role(name).with_context(err_msg)?;
-                }
-            }
             Some(("session", name)) => {
                 if self.session.is_none() {
                     self.use_session(Some(name)).with_context(err_msg)?;
@@ -203,18 +188,6 @@ impl Config {
         self.buffer_editor
             .clone()
             .or_else(|| env::var("VISUAL").ok().or_else(|| env::var("EDITOR").ok()))
-    }
-
-    pub fn retrieve_role(&self, name: &str) -> Result<Role> {
-        self.roles
-            .iter()
-            .find(|v| v.match_name(name))
-            .map(|v| {
-                let mut role = v.clone();
-                role.complete_prompt_args(name);
-                role
-            })
-            .ok_or_else(|| anyhow!("Unknown role `{name}`"))
     }
 
     pub fn config_dir() -> Result<PathBuf> {
@@ -263,13 +236,7 @@ impl Config {
         let timestamp = now();
         let summary = input.summary();
         let input_markdown = input.render();
-        let scope = match (input.role().map(|v| v.name.as_str()), input.rag()) {
-            (Some(role), Some(rag)) => format!(" ({role}#{rag})"),
-            (Some(role), _) => format!(" ({role})"),
-            (None, Some(rag)) => format!(" (#{rag})"),
-            _ => String::new(),
-        };
-        let output = format!("# CHAT: {summary} [{timestamp}]{scope}\n{input_markdown}\n--------\n{output}\n--------\n\n",);
+        let output = format!("# CHAT: {summary} [{timestamp}]\n{input_markdown}\n--------\n{output}\n--------\n\n",);
         file.write_all(output.as_bytes())
             .with_context(|| "Failed to save message")
     }
@@ -334,36 +301,6 @@ impl Config {
         Ok(path)
     }
 
-    pub fn use_prompt(&mut self, prompt: &str) -> Result<()> {
-        let role = Role::temp(prompt);
-        self.use_role_obj(role)
-    }
-
-    pub fn use_role(&mut self, name: &str) -> Result<()> {
-        let role = self.retrieve_role(name)?;
-        self.use_role_obj(role)
-    }
-
-    pub fn use_role_obj(&mut self, role: Role) -> Result<()> {
-        if let Some(session) = self.session.as_mut() {
-            session.guard_empty()?;
-            session.set_role_properties(&role);
-        }
-        if let Some(model_id) = &role.model_id {
-            self.set_model(model_id)?;
-        }
-        self.role = Some(role);
-        Ok(())
-    }
-
-    pub fn exit_role(&mut self) -> Result<()> {
-        if self.session.is_none() {
-            self.restore_model()?;
-        }
-        self.role = None;
-        Ok(())
-    }
-
     pub fn state(&self) -> StateFlags {
         let mut flags = StateFlags::empty();
         if let Some(session) = &self.session {
@@ -373,21 +310,12 @@ impl Config {
                 flags |= StateFlags::SESSION;
             }
         }
-        if self.role.is_some() {
-            flags |= StateFlags::ROLE;
-        }
         flags
-    }
-
-    pub fn has_role_or_session(&self) -> bool {
-        self.role.is_some() || self.session.is_some()
     }
 
     pub fn set_temperature(&mut self, value: Option<f64>) {
         if let Some(session) = self.session.as_mut() {
             session.set_temperature(value);
-        } else if let Some(role) = self.role.as_mut() {
-            role.set_temperature(value);
         } else {
             self.temperature = value;
         }
@@ -396,8 +324,6 @@ impl Config {
     pub fn set_top_p(&mut self, value: Option<f64>) {
         if let Some(session) = self.session.as_mut() {
             session.set_top_p(value);
-        } else if let Some(role) = self.role.as_mut() {
-            role.set_top_p(value);
         } else {
             self.top_p = value;
         }
@@ -440,9 +366,7 @@ impl Config {
             Some(model) => {
                 if let Some(session) = self.session.as_mut() {
                     session.set_model(&model);
-                } else if let Some(role) = self.role.as_mut() {
-                    role.set_model(&model);
-                }
+                } 
                 self.model = model;
                 Ok(())
             }
@@ -466,8 +390,6 @@ impl Config {
             .map_or_else(|| String::from("no"), |v| v.to_string());
         let (temperature, top_p) = if let Some(session) = &self.session {
             (session.temperature(), session.top_p())
-        } else if let Some(role) = &self.role {
-            (role.temperature, role.top_p)
         } else {
             (self.temperature, self.top_p)
         };
@@ -510,14 +432,6 @@ impl Config {
         Ok(output)
     }
 
-    pub fn role_info(&self) -> Result<String> {
-        if let Some(role) = &self.role {
-            role.export()
-        } else {
-            bail!("No role")
-        }
-    }
-
     pub fn session_info(&self) -> Result<String> {
         if let Some(session) = &self.session {
             let render_options = self.get_render_options()?;
@@ -531,8 +445,6 @@ impl Config {
     pub fn info(&self) -> Result<String> {
         if let Some(session) = &self.session {
             session.export()
-        } else if let Some(role) = &self.role {
-            role.export()
         } else {
             self.system_info()
         }
@@ -543,76 +455,6 @@ impl Config {
             .as_ref()
             .map(|(_, reply)| reply.as_str())
             .unwrap_or_default()
-    }
-
-    pub fn repl_complete(&self, cmd: &str, args: &[&str]) -> Vec<(String, String)> {
-        let (values, filter) = if args.len() == 1 {
-            let values = match cmd {
-                ".role" => self
-                    .roles
-                    .iter()
-                    .map(|v| (v.name.clone(), String::new()))
-                    .collect(),
-                ".model" => list_chat_models(self)
-                    .into_iter()
-                    .map(|v| (v.id(), v.description()))
-                    .collect(),
-                ".session" => self
-                    .list_sessions()
-                    .into_iter()
-                    .map(|v| (v.clone(), String::new()))
-                    .collect(),
-                ".set" => vec![
-                    "max_output_tokens",
-                    "temperature",
-                    "top_p",
-                    "rag_top_k",
-                    "function_calling",
-                    "compress_threshold",
-                    "save",
-                    "save_session",
-                    "highlight",
-                    "dry_run",
-                    "auto_copy",
-                ]
-                .into_iter()
-                .map(|v| (format!("{v} "), String::new()))
-                .collect(),
-                _ => vec![],
-            };
-            (values, args[0])
-        } else if args.len() == 2 {
-            let values = match args[0] {
-                "max_output_tokens" => match self.model.max_output_tokens() {
-                    Some(v) => vec![v.to_string()],
-                    None => vec![],
-                },
-                "function_calling" => complete_bool(self.function_calling),
-                "save" => complete_bool(self.save),
-                "save_session" => {
-                    let save_session = if let Some(session) = &self.session {
-                        session.save_session()
-                    } else {
-                        self.save_session
-                    };
-                    complete_option_bool(save_session)
-                }
-                "highlight" => complete_bool(self.highlight),
-                "dry_run" => complete_bool(self.dry_run),
-                "auto_copy" => complete_bool(self.auto_copy),
-                _ => vec![],
-            };
-            (
-                values.into_iter().map(|v| (v, String::new())).collect(),
-                args[1],
-            )
-        } else {
-            return vec![];
-        };
-        values
-            .into_iter()
-            .filter(|(value, _)| fuzzy_match(value, filter))
-            .collect()
     }
 
     pub fn update(&mut self, data: &str) -> Result<()> {
@@ -883,9 +725,7 @@ impl Config {
         if self.auto_copy {
             output.insert("auto_copy", "true".to_string());
         }
-        if let Some(role) = &self.role {
-            output.insert("role", role.name.clone());
-        }
+       
         if let Some(session) = &self.session {
             output.insert("session", session.name().to_string());
             output.insert("dirty", session.dirty.to_string());
@@ -973,25 +813,6 @@ impl Config {
         let config =
             serde_json::from_value(config).with_context(|| "Failed to load config from env")?;
         Ok(config)
-    }
-
-    fn load_roles(&mut self) -> Result<()> {
-        let path = Self::roles_file()?;
-        self.roles = if !path.exists() {
-            vec![]
-        } else {
-            let content = read_to_string(&path)
-                .with_context(|| format!("Failed to load roles at {}", path.display()))?;
-            serde_yaml::from_str(&content).with_context(|| "Invalid roles config")?
-        };
-        let exist_roles: HashSet<_> = self.roles.iter().map(|v| v.name.clone()).collect();
-        let builtin_roles = Role::builtin();
-        for role in builtin_roles {
-            if !exist_roles.contains(&role.name) {
-                self.roles.push(role);
-            }
-        }
-        Ok(())
     }
 
     fn setup_model(&mut self) -> Result<()> {

@@ -1,5 +1,5 @@
 use super::input::resolve_data_url;
-use super::{Config, Input, Model, Role};
+use super::{Config, Input, Model};
 
 use crate::client::{Message, MessageContent, MessageRole};
 use crate::render::MarkdownRender;
@@ -73,9 +73,6 @@ impl Session {
             compressing: false,
             model: config.model.clone(),
         };
-        if let Some(role) = &config.role {
-            session.set_role_properties(role);
-        }
         session
     }
 
@@ -262,12 +259,6 @@ impl Session {
         self.function_matcher = function_matcher.map(|v| v.to_string());
     }
 
-    pub fn set_role_properties(&mut self, role: &Role) {
-        self.set_temperature(role.temperature);
-        self.set_top_p(role.top_p);
-        self.set_function_matcher(role.function_matcher.as_deref());
-    }
-
     pub fn set_save_session(&mut self, value: Option<bool>) {
         if self.name == TEMP_SESSION_NAME {
             return;
@@ -366,12 +357,6 @@ impl Session {
 
     pub fn add_message(&mut self, input: &Input, output: &str) -> Result<()> {
         let mut need_add_msg = true;
-        if self.messages.is_empty() {
-            if let Some(role) = input.role() {
-                self.messages.extend(role.build_messages(input));
-                need_add_msg = false;
-            }
-        }
         if need_add_msg {
             self.messages
                 .push(Message::new(MessageRole::User, input.message_content()));
@@ -401,12 +386,8 @@ impl Session {
         let mut messages = self.messages.clone();
         let mut need_add_msg = true;
         let len = messages.len();
-        if len == 0 {
-            if let Some(role) = input.role() {
-                messages = role.build_messages(input);
-                need_add_msg = false;
-            }
-        } else if len == 1 && self.compressed_messages.len() >= 2 {
+        // TODO: Review the change
+        if len == 0 && self.compressed_messages.len() >= 2 {
             messages
                 .extend(self.compressed_messages[self.compressed_messages.len() - 2..].to_vec());
         }

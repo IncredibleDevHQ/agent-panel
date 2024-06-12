@@ -13,8 +13,7 @@ extern crate log;
 
 use crate::cli::Cli;
 use crate::config::{
-    Config, GlobalConfig, Input, InputContext, WorkingMode, CODE_ROLE, EXPLAIN_SHELL_ROLE,
-    SHELL_ROLE,
+    Config, GlobalConfig, Input, InputContext, WorkingMode,
 };
 use crate::function::{eval_tool_calls, need_send_call_results};
 use crate::render::{render_error, MarkdownRender};

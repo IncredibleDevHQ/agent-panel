@@ -1,11 +1,11 @@
-use super::{role::Role, session::Session, GlobalConfig};
+use super::{session::Session, GlobalConfig};
 
 use crate::client::{
     init_client, ChatCompletionsData, Client, ImageUrl, Message, MessageContent,
     MessageContentPart, MessageRole, Model,
 };
 use crate::function::{ToolCallResult, ToolResults};
-use crate::utils::{base64_encode, sha256, warning_text, AbortSignal, IS_STDOUT_TERMINAL};
+use crate::utils::{base64_encode, sha256, warning_text, IS_STDOUT_TERMINAL};
 
 use anyhow::{bail, Context, Result};
 use fancy_regex::Regex;
@@ -150,11 +150,6 @@ impl Input {
     pub fn model(&self) -> Model {
         if let Some(session) = self.session(&self.config.read().session) {
             return session.model.clone();
-        } else if let Some(model) = self
-            .role()
-            .and_then(|v| v.retrieve_model(&self.config.read()))
-        {
-            return model;
         }
         self.config.read().model.clone()
     }
@@ -176,8 +171,6 @@ impl Input {
         let (temperature, top_p) = if let Some(session) = self.session(&self.config.read().session)
         {
             (session.temperature(), session.top_p())
-        } else if let Some(role) = self.role() {
-            (role.temperature, role.top_p)
         } else {
             let config = self.config.read();
             (config.temperature, config.top_p)
@@ -187,8 +180,6 @@ impl Input {
             let config = self.config.read();
             let function_matcher = if let Some(session) = self.session(&config.session) {
                 session.function_matcher()
-            } else if let Some(role) = self.role() {
-                role.function_matcher.as_deref()
             } else {
                 None
             };
@@ -214,8 +205,6 @@ impl Input {
     pub fn build_messages(&self) -> Result<Vec<Message>> {
         let mut messages = if let Some(session) = self.session(&self.config.read().session) {
             session.build_messages(self)
-        } else if let Some(role) = self.role() {
-            role.build_messages(self)
         } else {
             vec![Message::new(MessageRole::User, self.message_content())]
         };
@@ -231,15 +220,9 @@ impl Input {
     pub fn echo_messages(&self) -> String {
         if let Some(session) = self.session(&self.config.read().session) {
             session.echo_messages(self)
-        } else if let Some(role) = self.role() {
-            role.echo_messages(self)
         } else {
             self.render()
         }
-    }
-
-    pub fn role(&self) -> Option<&Role> {
-        self.context.role.as_ref()
     }
 
     pub fn session<'a>(&self, session: &'a Option<Session>) -> Option<&'a Session> {
@@ -322,25 +305,17 @@ impl Input {
 
 #[derive(Debug, Clone, Default)]
 pub struct InputContext {
-    role: Option<Role>,
     session: bool,
 }
 
 impl InputContext {
-    pub fn new(role: Option<Role>, session: bool) -> Self {
-        Self { role, session }
+    pub fn new(session: bool) -> Self {
+        Self { session }
     }
 
     pub fn from_config(config: &GlobalConfig) -> Self {
         let config = config.read();
-        InputContext::new(config.role.clone(), config.session.is_some())
-    }
-
-    pub fn role(role: Role) -> Self {
-        Self {
-            role: Some(role),
-            session: false,
-        }
+        InputContext::new(config.session.is_some())
     }
 }
 
