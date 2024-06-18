@@ -61,7 +61,6 @@ pub struct Config {
     pub dry_run: bool,
     pub save: bool,
     pub save_session: Option<bool>,
-    pub highlight: bool,
     pub wrap: Option<String>,
     pub auto_copy: bool,
     pub keybindings: Keybindings,
@@ -97,7 +96,6 @@ impl Default for Config {
             top_p: None,
             save: false,
             save_session: None,
-            highlight: true,
             dry_run: false,
             wrap: None,
             auto_copy: false,
@@ -148,7 +146,6 @@ impl Config {
         config.function = Function::init(&Self::functions_dir()?)?;
 
         config.setup_model()?;
-        config.setup_highlight();
 
         Ok(config)
     }
@@ -378,7 +375,6 @@ impl Config {
             ("dry_run", self.dry_run.to_string()),
             ("save", self.save.to_string()),
             ("save_session", format_option_value(&self.save_session)),
-            ("highlight", self.highlight.to_string()),
             ("wrap", wrap),
             ("auto_copy", self.auto_copy.to_string()),
             ("keybindings", self.keybindings.stringify().into()),
@@ -451,10 +447,6 @@ impl Config {
             "save_session" => {
                 let value = parse_value(value)?;
                 self.set_save_session(value);
-            }
-            "highlight" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.highlight = value;
             }
             "dry_run" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
@@ -645,28 +637,6 @@ impl Config {
             output.insert("user_messages_len", session.user_messages_len().to_string());
         }
 
-        if self.highlight {
-            output.insert("color.reset", "\u{1b}[0m".to_string());
-            output.insert("color.black", "\u{1b}[30m".to_string());
-            output.insert("color.dark_gray", "\u{1b}[90m".to_string());
-            output.insert("color.red", "\u{1b}[31m".to_string());
-            output.insert("color.light_red", "\u{1b}[91m".to_string());
-            output.insert("color.green", "\u{1b}[32m".to_string());
-            output.insert("color.light_green", "\u{1b}[92m".to_string());
-            output.insert("color.yellow", "\u{1b}[33m".to_string());
-            output.insert("color.light_yellow", "\u{1b}[93m".to_string());
-            output.insert("color.blue", "\u{1b}[34m".to_string());
-            output.insert("color.light_blue", "\u{1b}[94m".to_string());
-            output.insert("color.purple", "\u{1b}[35m".to_string());
-            output.insert("color.light_purple", "\u{1b}[95m".to_string());
-            output.insert("color.magenta", "\u{1b}[35m".to_string());
-            output.insert("color.light_magenta", "\u{1b}[95m".to_string());
-            output.insert("color.cyan", "\u{1b}[36m".to_string());
-            output.insert("color.light_cyan", "\u{1b}[96m".to_string());
-            output.insert("color.white", "\u{1b}[37m".to_string());
-            output.insert("color.light_gray", "\u{1b}[97m".to_string());
-        }
-
         output
     }
 
@@ -739,16 +709,6 @@ impl Config {
         self.set_model(&model_id)?;
         self.model_id = model_id;
         Ok(())
-    }
-
-    fn setup_highlight(&mut self) {
-        if let Ok(value) = env::var("NO_COLOR") {
-            let mut no_color = false;
-            set_bool(&mut no_color, &value);
-            if no_color {
-                self.highlight = false;
-            }
-        }
     }
 }
 

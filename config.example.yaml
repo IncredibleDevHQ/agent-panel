@@ -3,7 +3,6 @@ temperature: null                # Set default temperature parameter
 top_p: null                      # Set default top-p parameter
 save: true                       # Indicates whether to persist the message
 save_session: null               # Controls the persistence of the session, if null, asking the user
-highlight: true                  # Controls syntax highlighting
 wrap: no                         # Controls text wrapping (no, auto, <max-width>)
 auto_copy: false                 # Enables or disables automatic copying the last LLM response to the clipboard 
 keybindings: emacs               # Choose keybinding style (emacs, vi)
