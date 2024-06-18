@@ -1,5 +1,3 @@
-use crate::config::WorkingMode;
-
 use anyhow::Result;
 use log::LevelFilter;
 use simplelog::{format_description, Config as LogConfig, ConfigBuilder};

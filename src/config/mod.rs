@@ -10,8 +10,8 @@ use crate::client::{
 };
 use crate::function::{Function, ToolCallResult};
 use crate::utils::{
-    format_option_value, fuzzy_match, get_env_name, light_theme_from_colorfgbg, now, 
-    set_text, AbortSignal, IS_STDOUT_TERMINAL,
+    format_option_value, get_env_name, now, 
+    set_text, 
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -19,7 +19,7 @@ use inquire::{Confirm, Select};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::{
     env,
     fs::{create_dir_all, read_dir, read_to_string, remove_file, File, OpenOptions},
@@ -28,17 +28,9 @@ use std::{
     process::exit,
     sync::Arc,
 };
-use syntect::highlighting::ThemeSet;
-
-/// Monokai Extended
-const DARK_THEME: &[u8] = include_bytes!("../../assets/monokai-extended.theme.bin");
-const LIGHT_THEME: &[u8] = include_bytes!("../../assets/monokai-extended-light.theme.bin");
-
 const CONFIG_FILE_NAME: &str = "config.yaml";
-const ROLES_FILE_NAME: &str = "roles.yaml";
 const MESSAGES_FILE_NAME: &str = "messages.md";
 const SESSIONS_DIR_NAME: &str = "sessions";
-const RAGS_DIR_NAME: &str = "rags";
 const FUNCTIONS_DIR_NAME: &str = "functions";
 
 const CLIENTS_FIELD: &str = "clients";
@@ -66,26 +58,9 @@ pub struct Config {
     pub model_id: String,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
-    pub dry_run: bool,
     pub save: bool,
     pub save_session: Option<bool>,
-    pub highlight: bool,
-    pub light_theme: bool,
-    pub wrap: Option<String>,
-    pub wrap_code: bool,
-    pub auto_copy: bool,
-    pub keybindings: Keybindings,
-    pub prelude: Option<String>,
-    pub buffer_editor: Option<String>,
-    pub embedding_model: Option<String>,
-    pub rag_top_k: usize,
-    pub rag_template: Option<String>,
     pub function_calling: bool,
-    pub compress_threshold: usize,
-    pub summarize_prompt: Option<String>,
-    pub summary_prompt: Option<String>,
-    pub left_prompt: Option<String>,
-    pub right_prompt: Option<String>,
     pub clients: Vec<ClientConfig>,
     #[serde(skip)]
     pub session: Option<Session>,
@@ -93,8 +68,6 @@ pub struct Config {
     pub model: Model,
     #[serde(skip)]
     pub function: Function,
-    #[serde(skip)]
-    pub working_mode: WorkingMode,
     #[serde(skip)]
     pub last_message: Option<(Input, String)>,
 }
@@ -107,29 +80,11 @@ impl Default for Config {
             top_p: None,
             save: false,
             save_session: None,
-            highlight: true,
-            dry_run: false,
-            light_theme: false,
-            wrap: None,
-            wrap_code: false,
-            auto_copy: false,
-            keybindings: Default::default(),
-            prelude: None,
-            buffer_editor: None,
-            embedding_model: None,
-            rag_top_k: 4,
-            rag_template: None,
             function_calling: false,
-            compress_threshold: 4000,
-            summarize_prompt: None,
-            summary_prompt: None,
-            left_prompt: None,
-            right_prompt: None,
             clients: vec![],
             session: None,
             model: Default::default(),
             function: Default::default(),
-            working_mode: WorkingMode::Command,
             last_message: None,
         }
     }
@@ -153,42 +108,11 @@ impl Config {
             Self::load_config_file(&config_path)?
         };
 
-        if let Some(wrap) = config.wrap.clone() {
-            config.set_wrap(&wrap)?;
-        }
-
         config.function = Function::init(&Self::functions_dir()?)?;
 
         config.setup_model()?;
-        config.setup_highlight();
-        config.setup_light_theme()?;
 
         Ok(config)
-    }
-
-    pub fn apply_prelude(&mut self) -> Result<()> {
-        let prelude = self.prelude.clone().unwrap_or_default();
-        if prelude.is_empty() {
-            return Ok(());
-        }
-        let err_msg = || format!("Invalid prelude '{}", prelude);
-        match prelude.split_once(':') {
-            Some(("session", name)) => {
-                if self.session.is_none() {
-                    self.use_session(Some(name)).with_context(err_msg)?;
-                }
-            }
-            _ => {
-                bail!("{}", err_msg())
-            }
-        }
-        Ok(())
-    }
-
-    pub fn buffer_editor(&self) -> Option<String> {
-        self.buffer_editor
-            .clone()
-            .or_else(|| env::var("VISUAL").ok().or_else(|| env::var("EDITOR").ok()))
     }
 
     pub fn config_dir() -> Result<PathBuf> {
@@ -218,10 +142,6 @@ impl Config {
         input.clear_patch_text();
         self.last_message = Some((input.clone(), output.to_string()));
 
-        if self.dry_run || output.is_empty() || !tool_call_results.is_empty() {
-            return Ok(());
-        }
-
         if let Some(session) = input.session_mut(&mut self.session) {
             session.add_message(input, output)?;
             return Ok(());
@@ -242,23 +162,10 @@ impl Config {
             .with_context(|| "Failed to save message")
     }
 
-    pub fn maybe_copy(&self, text: &str) {
-        if self.auto_copy {
-            let _ = set_text(text);
-        }
-    }
-
     pub fn config_file() -> Result<PathBuf> {
         match env::var(get_env_name("config_file")) {
             Ok(value) => Ok(PathBuf::from(value)),
             Err(_) => Self::local_path(CONFIG_FILE_NAME),
-        }
-    }
-
-    pub fn roles_file() -> Result<PathBuf> {
-        match env::var(get_env_name("roles_file")) {
-            Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Self::local_path(ROLES_FILE_NAME),
         }
     }
 
@@ -276,13 +183,6 @@ impl Config {
         }
     }
 
-    pub fn rags_dir() -> Result<PathBuf> {
-        match env::var(get_env_name("rags_dir")) {
-            Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Self::local_path(RAGS_DIR_NAME),
-        }
-    }
-
     pub fn functions_dir() -> Result<PathBuf> {
         match env::var(get_env_name("functions_dir")) {
             Ok(value) => Ok(PathBuf::from(value)),
@@ -293,12 +193,6 @@ impl Config {
     pub fn session_file(name: &str) -> Result<PathBuf> {
         let mut path = Self::sessions_dir()?;
         path.push(&format!("{name}.yaml"));
-        Ok(path)
-    }
-
-    pub fn rag_file(name: &str) -> Result<PathBuf> {
-        let mut path = Self::rags_dir()?;
-        path.push(&format!("{name}.bin"));
         Ok(path)
     }
 
@@ -338,28 +232,6 @@ impl Config {
         }
     }
 
-    pub fn set_compress_threshold(&mut self, value: Option<usize>) {
-        if let Some(session) = self.session.as_mut() {
-            session.set_compress_threshold(value);
-        } else {
-            self.compress_threshold = value.unwrap_or_default();
-        }
-    }
-
-    pub fn set_wrap(&mut self, value: &str) -> Result<()> {
-        if value == "no" {
-            self.wrap = None;
-        } else if value == "auto" {
-            self.wrap = Some(value.into());
-        } else {
-            value
-                .parse::<u16>()
-                .map_err(|_| anyhow!("Invalid wrap value"))?;
-            self.wrap = Some(value.into())
-        }
-        Ok(())
-    }
-
     pub fn set_model(&mut self, value: &str) -> Result<()> {
         let model = Model::find(&list_chat_models(self), value);
         match model {
@@ -385,10 +257,6 @@ impl Config {
 
     pub fn system_info(&self) -> Result<String> {
         let display_path = |path: &Path| path.display().to_string();
-        let wrap = self
-            .wrap
-            .clone()
-            .map_or_else(|| String::from("no"), |v| v.to_string());
         let (temperature, top_p) = if let Some(session) = &self.session {
             (session.temperature(), session.top_p())
         } else {
@@ -405,24 +273,12 @@ impl Config {
             ),
             ("temperature", format_option_value(&temperature)),
             ("top_p", format_option_value(&top_p)),
-            ("rag_top_k", self.rag_top_k.to_string()),
             ("function_calling", self.function_calling.to_string()),
-            ("compress_threshold", self.compress_threshold.to_string()),
-            ("dry_run", self.dry_run.to_string()),
             ("save", self.save.to_string()),
             ("save_session", format_option_value(&self.save_session)),
-            ("highlight", self.highlight.to_string()),
-            ("light_theme", self.light_theme.to_string()),
-            ("wrap", wrap),
-            ("wrap_code", self.wrap_code.to_string()),
-            ("auto_copy", self.auto_copy.to_string()),
-            ("keybindings", self.keybindings.stringify().into()),
-            ("prelude", format_option_value(&self.prelude)),
             ("config_file", display_path(&Self::config_file()?)),
-            ("roles_file", display_path(&Self::roles_file()?)),
             ("messages_file", display_path(&Self::messages_file()?)),
             ("sessions_dir", display_path(&Self::sessions_dir()?)),
-            ("rags_dir", display_path(&Self::rags_dir()?)),
             ("functions_dir", display_path(&Self::functions_dir()?)),
         ];
         let output = items
@@ -468,18 +324,9 @@ impl Config {
                 let value = parse_value(value)?;
                 self.set_top_p(value);
             }
-            "rag_top_k" => {
-                if let Some(value) = parse_value(value)? {
-                    self.rag_top_k = value;
-                }
-            }
             "function_calling" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
                 self.function_calling = value;
-            }
-            "compress_threshold" => {
-                let value = parse_value(value)?;
-                self.set_compress_threshold(value);
             }
             "save" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
@@ -488,18 +335,6 @@ impl Config {
             "save_session" => {
                 let value = parse_value(value)?;
                 self.set_save_session(value);
-            }
-            "highlight" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.highlight = value;
-            }
-            "dry_run" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.dry_run = value;
-            }
-            "auto_copy" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.auto_copy = value;
             }
             _ => bail!("Unknown key `{key}`"),
         }
@@ -554,9 +389,8 @@ impl Config {
 
     pub fn exit_session(&mut self) -> Result<()> {
         if let Some(mut session) = self.session.take() {
-            let is_repl = self.working_mode == WorkingMode::Repl;
             let sessions_dir = Self::sessions_dir()?;
-            session.exit(&sessions_dir, is_repl)?;
+            session.exit(&sessions_dir, false)?;
             self.last_message = None;
             self.restore_model()?;
         }
@@ -602,26 +436,6 @@ impl Config {
         }
     }
 
-    pub fn should_compress_session(&mut self) -> bool {
-        if let Some(session) = self.session.as_mut() {
-            if session.need_compress(self.compress_threshold) {
-                session.compressing = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn compress_session(&mut self, summary: &str) {
-        if let Some(session) = self.session.as_mut() {
-            let summary_prompt = self.summary_prompt.as_deref().unwrap_or(SUMMARY_PROMPT);
-            session.compress(format!("{}{}", summary_prompt, summary));
-        }
-    }
-
-    pub fn summarize_prompt(&self) -> &str {
-        self.summarize_prompt.as_deref().unwrap_or(SUMMARIZE_PROMPT)
-    }
 
     pub fn is_compressing_session(&self) -> bool {
         self.session
@@ -658,21 +472,9 @@ impl Config {
                 output.insert("top_p", top_p.to_string());
             }
         }
-        if self.dry_run {
-            output.insert("dry_run", "true".to_string());
-        }
         if self.save {
             output.insert("save", "true".to_string());
         }
-        if let Some(wrap) = &self.wrap {
-            if wrap != "no" {
-                output.insert("wrap", wrap.clone());
-            }
-        }
-        if self.auto_copy {
-            output.insert("auto_copy", "true".to_string());
-        }
-       
         if let Some(session) = &self.session {
             output.insert("session", session.name().to_string());
             output.insert("dirty", session.dirty.to_string());
@@ -680,28 +482,6 @@ impl Config {
             output.insert("consume_tokens", tokens.to_string());
             output.insert("consume_percent", percent.to_string());
             output.insert("user_messages_len", session.user_messages_len().to_string());
-        }
-
-        if self.highlight {
-            output.insert("color.reset", "\u{1b}[0m".to_string());
-            output.insert("color.black", "\u{1b}[30m".to_string());
-            output.insert("color.dark_gray", "\u{1b}[90m".to_string());
-            output.insert("color.red", "\u{1b}[31m".to_string());
-            output.insert("color.light_red", "\u{1b}[91m".to_string());
-            output.insert("color.green", "\u{1b}[32m".to_string());
-            output.insert("color.light_green", "\u{1b}[92m".to_string());
-            output.insert("color.yellow", "\u{1b}[33m".to_string());
-            output.insert("color.light_yellow", "\u{1b}[93m".to_string());
-            output.insert("color.blue", "\u{1b}[34m".to_string());
-            output.insert("color.light_blue", "\u{1b}[94m".to_string());
-            output.insert("color.purple", "\u{1b}[35m".to_string());
-            output.insert("color.light_purple", "\u{1b}[95m".to_string());
-            output.insert("color.magenta", "\u{1b}[35m".to_string());
-            output.insert("color.light_magenta", "\u{1b}[95m".to_string());
-            output.insert("color.cyan", "\u{1b}[36m".to_string());
-            output.insert("color.light_cyan", "\u{1b}[96m".to_string());
-            output.insert("color.white", "\u{1b}[37m".to_string());
-            output.insert("color.light_gray", "\u{1b}[97m".to_string());
         }
 
         output
@@ -777,59 +557,6 @@ impl Config {
         self.model_id = model_id;
         Ok(())
     }
-
-    fn setup_highlight(&mut self) {
-        if let Ok(value) = env::var("NO_COLOR") {
-            let mut no_color = false;
-            set_bool(&mut no_color, &value);
-            if no_color {
-                self.highlight = false;
-            }
-        }
-    }
-
-    fn setup_light_theme(&mut self) -> Result<()> {
-        if self.light_theme {
-            return Ok(());
-        }
-        if let Ok(value) = env::var(get_env_name("light_theme")) {
-            set_bool(&mut self.light_theme, &value);
-            return Ok(());
-        } else if let Ok(value) = env::var("COLORFGBG") {
-            if let Some(light) = light_theme_from_colorfgbg(&value) {
-                self.light_theme = light
-            }
-        };
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub enum Keybindings {
-    #[serde(rename = "emacs")]
-    #[default]
-    Emacs,
-    #[serde(rename = "vi")]
-    Vi,
-}
-
-impl Keybindings {
-    pub fn is_vi(&self) -> bool {
-        matches!(self, Keybindings::Vi)
-    }
-    pub fn stringify(&self) -> &str {
-        match self {
-            Keybindings::Emacs => "emacs",
-            Keybindings::Vi => "vi",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WorkingMode {
-    Command,
-    Repl,
-    Serve,
 }
 
 bitflags::bitflags! {

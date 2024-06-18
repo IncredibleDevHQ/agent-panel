@@ -306,10 +306,6 @@ pub trait Client: Sync + Send {
     }
 
     async fn chat_completions(&self, input: Input) -> Result<ChatCompletionsOutput> {
-        if self.global_config().read().dry_run {
-            let content = input.echo_messages();
-            return Ok(ChatCompletionsOutput::new(&content));
-        }
         let client = self.build_client()?;
         let data = input.prepare_completion_data(self.model(), false)?;
         self.chat_completions_inner(&client, data)
@@ -326,15 +322,6 @@ pub trait Client: Sync + Send {
         let input = input.clone();
         tokio::select! {
             ret = async {
-                if self.global_config().read().dry_run {
-                    let content = input.echo_messages();
-                    let tokens = tokenize(&content);
-                    for token in tokens {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                        handler.text(token)?;
-                    }
-                    return Ok(());
-                }
                 let client = self.build_client()?;
                 let data = input.prepare_completion_data(self.model(), true)?;
                 self.chat_completions_streaming_inner(&client, handler, data).await

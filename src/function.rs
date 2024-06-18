@@ -1,9 +1,4 @@
-use crate::{
-    config::GlobalConfig,
-    utils::{get_env_bool, indent_text, IS_STDOUT_TERMINAL},
-};
-
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use indexmap::{IndexMap, IndexSet};
 use inquire::{validator::Validation, Text};
