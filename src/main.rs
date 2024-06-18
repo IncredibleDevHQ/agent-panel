@@ -13,7 +13,6 @@ use crate::config::Config;
 use crate::utils::{create_abort_signal, CODE_BLOCK_RE, IS_STDOUT_TERMINAL};
 
 use anyhow::{bail, Result};
-use async_recursion::async_recursion;
 use clap::Parser;
 use parking_lot::RwLock;
 use std::sync::Arc;

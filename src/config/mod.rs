@@ -58,20 +58,9 @@ pub struct Config {
     pub model_id: String,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
-    pub dry_run: bool,
     pub save: bool,
     pub save_session: Option<bool>,
-    pub auto_copy: bool,
-    pub buffer_editor: Option<String>,
-    pub embedding_model: Option<String>,
-    pub rag_top_k: usize,
-    pub rag_template: Option<String>,
     pub function_calling: bool,
-    pub compress_threshold: usize,
-    pub summarize_prompt: Option<String>,
-    pub summary_prompt: Option<String>,
-    pub left_prompt: Option<String>,
-    pub right_prompt: Option<String>,
     pub clients: Vec<ClientConfig>,
     #[serde(skip)]
     pub session: Option<Session>,
@@ -91,18 +80,7 @@ impl Default for Config {
             top_p: None,
             save: false,
             save_session: None,
-            dry_run: false,
-            auto_copy: false,
-            buffer_editor: None,
-            embedding_model: None,
-            rag_top_k: 4,
-            rag_template: None,
             function_calling: false,
-            compress_threshold: 4000,
-            summarize_prompt: None,
-            summary_prompt: None,
-            left_prompt: None,
-            right_prompt: None,
             clients: vec![],
             session: None,
             model: Default::default(),
@@ -137,12 +115,6 @@ impl Config {
         Ok(config)
     }
 
-    pub fn buffer_editor(&self) -> Option<String> {
-        self.buffer_editor
-            .clone()
-            .or_else(|| env::var("VISUAL").ok().or_else(|| env::var("EDITOR").ok()))
-    }
-
     pub fn config_dir() -> Result<PathBuf> {
         let env_name = get_env_name("config_dir");
         let path = if let Some(v) = env::var_os(env_name) {
@@ -170,10 +142,6 @@ impl Config {
         input.clear_patch_text();
         self.last_message = Some((input.clone(), output.to_string()));
 
-        if self.dry_run || output.is_empty() || !tool_call_results.is_empty() {
-            return Ok(());
-        }
-
         if let Some(session) = input.session_mut(&mut self.session) {
             session.add_message(input, output)?;
             return Ok(());
@@ -192,12 +160,6 @@ impl Config {
         let output = format!("# CHAT: {summary} [{timestamp}]\n{input_markdown}\n--------\n{output}\n--------\n\n",);
         file.write_all(output.as_bytes())
             .with_context(|| "Failed to save message")
-    }
-
-    pub fn maybe_copy(&self, text: &str) {
-        if self.auto_copy {
-            let _ = set_text(text);
-        }
     }
 
     pub fn config_file() -> Result<PathBuf> {
@@ -270,14 +232,6 @@ impl Config {
         }
     }
 
-    pub fn set_compress_threshold(&mut self, value: Option<usize>) {
-        if let Some(session) = self.session.as_mut() {
-            session.set_compress_threshold(value);
-        } else {
-            self.compress_threshold = value.unwrap_or_default();
-        }
-    }
-
     pub fn set_model(&mut self, value: &str) -> Result<()> {
         let model = Model::find(&list_chat_models(self), value);
         match model {
@@ -319,13 +273,9 @@ impl Config {
             ),
             ("temperature", format_option_value(&temperature)),
             ("top_p", format_option_value(&top_p)),
-            ("rag_top_k", self.rag_top_k.to_string()),
             ("function_calling", self.function_calling.to_string()),
-            ("compress_threshold", self.compress_threshold.to_string()),
-            ("dry_run", self.dry_run.to_string()),
             ("save", self.save.to_string()),
             ("save_session", format_option_value(&self.save_session)),
-            ("auto_copy", self.auto_copy.to_string()),
             ("config_file", display_path(&Self::config_file()?)),
             ("messages_file", display_path(&Self::messages_file()?)),
             ("sessions_dir", display_path(&Self::sessions_dir()?)),
@@ -374,18 +324,9 @@ impl Config {
                 let value = parse_value(value)?;
                 self.set_top_p(value);
             }
-            "rag_top_k" => {
-                if let Some(value) = parse_value(value)? {
-                    self.rag_top_k = value;
-                }
-            }
             "function_calling" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
                 self.function_calling = value;
-            }
-            "compress_threshold" => {
-                let value = parse_value(value)?;
-                self.set_compress_threshold(value);
             }
             "save" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
@@ -394,14 +335,6 @@ impl Config {
             "save_session" => {
                 let value = parse_value(value)?;
                 self.set_save_session(value);
-            }
-            "dry_run" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.dry_run = value;
-            }
-            "auto_copy" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.auto_copy = value;
             }
             _ => bail!("Unknown key `{key}`"),
         }
@@ -503,26 +436,6 @@ impl Config {
         }
     }
 
-    pub fn should_compress_session(&mut self) -> bool {
-        if let Some(session) = self.session.as_mut() {
-            if session.need_compress(self.compress_threshold) {
-                session.compressing = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn compress_session(&mut self, summary: &str) {
-        if let Some(session) = self.session.as_mut() {
-            let summary_prompt = self.summary_prompt.as_deref().unwrap_or(SUMMARY_PROMPT);
-            session.compress(format!("{}{}", summary_prompt, summary));
-        }
-    }
-
-    pub fn summarize_prompt(&self) -> &str {
-        self.summarize_prompt.as_deref().unwrap_or(SUMMARIZE_PROMPT)
-    }
 
     pub fn is_compressing_session(&self) -> bool {
         self.session
@@ -559,16 +472,9 @@ impl Config {
                 output.insert("top_p", top_p.to_string());
             }
         }
-        if self.dry_run {
-            output.insert("dry_run", "true".to_string());
-        }
         if self.save {
             output.insert("save", "true".to_string());
         }
-        if self.auto_copy {
-            output.insert("auto_copy", "true".to_string());
-        }
-       
         if let Some(session) = &self.session {
             output.insert("session", session.name().to_string());
             output.insert("dirty", session.dirty.to_string());
