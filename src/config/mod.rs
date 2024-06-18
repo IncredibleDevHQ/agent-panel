@@ -61,7 +61,6 @@ pub struct Config {
     pub dry_run: bool,
     pub save: bool,
     pub save_session: Option<bool>,
-    pub wrap: Option<String>,
     pub auto_copy: bool,
     pub keybindings: Keybindings,
     pub prelude: Option<String>,
@@ -97,7 +96,6 @@ impl Default for Config {
             save: false,
             save_session: None,
             dry_run: false,
-            wrap: None,
             auto_copy: false,
             keybindings: Default::default(),
             prelude: None,
@@ -138,10 +136,6 @@ impl Config {
         } else {
             Self::load_config_file(&config_path)?
         };
-
-        if let Some(wrap) = config.wrap.clone() {
-            config.set_wrap(&wrap)?;
-        }
 
         config.function = Function::init(&Self::functions_dir()?)?;
 
@@ -310,20 +304,6 @@ impl Config {
         }
     }
 
-    pub fn set_wrap(&mut self, value: &str) -> Result<()> {
-        if value == "no" {
-            self.wrap = None;
-        } else if value == "auto" {
-            self.wrap = Some(value.into());
-        } else {
-            value
-                .parse::<u16>()
-                .map_err(|_| anyhow!("Invalid wrap value"))?;
-            self.wrap = Some(value.into())
-        }
-        Ok(())
-    }
-
     pub fn set_model(&mut self, value: &str) -> Result<()> {
         let model = Model::find(&list_chat_models(self), value);
         match model {
@@ -349,10 +329,6 @@ impl Config {
 
     pub fn system_info(&self) -> Result<String> {
         let display_path = |path: &Path| path.display().to_string();
-        let wrap = self
-            .wrap
-            .clone()
-            .map_or_else(|| String::from("no"), |v| v.to_string());
         let (temperature, top_p) = if let Some(session) = &self.session {
             (session.temperature(), session.top_p())
         } else {
@@ -375,7 +351,6 @@ impl Config {
             ("dry_run", self.dry_run.to_string()),
             ("save", self.save.to_string()),
             ("save_session", format_option_value(&self.save_session)),
-            ("wrap", wrap),
             ("auto_copy", self.auto_copy.to_string()),
             ("keybindings", self.keybindings.stringify().into()),
             ("prelude", format_option_value(&self.prelude)),
@@ -618,11 +593,6 @@ impl Config {
         }
         if self.save {
             output.insert("save", "true".to_string());
-        }
-        if let Some(wrap) = &self.wrap {
-            if wrap != "no" {
-                output.insert("wrap", wrap.clone());
-            }
         }
         if self.auto_copy {
             output.insert("auto_copy", "true".to_string());
