@@ -62,7 +62,6 @@ pub struct Config {
     pub save: bool,
     pub save_session: Option<bool>,
     pub auto_copy: bool,
-    pub keybindings: Keybindings,
     pub prelude: Option<String>,
     pub buffer_editor: Option<String>,
     pub embedding_model: Option<String>,
@@ -82,8 +81,6 @@ pub struct Config {
     #[serde(skip)]
     pub function: Function,
     #[serde(skip)]
-    pub working_mode: WorkingMode,
-    #[serde(skip)]
     pub last_message: Option<(Input, String)>,
 }
 
@@ -97,7 +94,6 @@ impl Default for Config {
             save_session: None,
             dry_run: false,
             auto_copy: false,
-            keybindings: Default::default(),
             prelude: None,
             buffer_editor: None,
             embedding_model: None,
@@ -113,7 +109,6 @@ impl Default for Config {
             session: None,
             model: Default::default(),
             function: Default::default(),
-            working_mode: WorkingMode::Command,
             last_message: None,
         }
     }
@@ -352,7 +347,6 @@ impl Config {
             ("save", self.save.to_string()),
             ("save_session", format_option_value(&self.save_session)),
             ("auto_copy", self.auto_copy.to_string()),
-            ("keybindings", self.keybindings.stringify().into()),
             ("prelude", format_option_value(&self.prelude)),
             ("config_file", display_path(&Self::config_file()?)),
             ("messages_file", display_path(&Self::messages_file()?)),
@@ -680,34 +674,6 @@ impl Config {
         self.model_id = model_id;
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub enum Keybindings {
-    #[serde(rename = "emacs")]
-    #[default]
-    Emacs,
-    #[serde(rename = "vi")]
-    Vi,
-}
-
-impl Keybindings {
-    pub fn is_vi(&self) -> bool {
-        matches!(self, Keybindings::Vi)
-    }
-    pub fn stringify(&self) -> &str {
-        match self {
-            Keybindings::Emacs => "emacs",
-            Keybindings::Vi => "vi",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WorkingMode {
-    Command,
-    Repl,
-    Serve,
 }
 
 bitflags::bitflags! {
