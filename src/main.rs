@@ -1,4 +1,3 @@
-mod cli;
 mod client;
 mod config;
 mod function;
@@ -10,30 +9,28 @@ mod utils;
 #[macro_use]
 extern crate log;
 
-use crate::cli::Cli;
 use crate::config::{Config, GlobalConfig, Input, InputContext, WorkingMode};
 use crate::utils::{create_abort_signal, CODE_BLOCK_RE, IS_STDOUT_TERMINAL};
 
 use anyhow::{bail, Result};
 use async_recursion::async_recursion;
 use clap::Parser;
-use inquire::{Select, Text};
 use parking_lot::RwLock;
-use std::io::{stderr, stdin, Read};
-use std::process;
 use std::sync::Arc;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Port number to run the server on (optional)
+    #[arg(long)]
+    port: Option<u16>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
+    let args = Args::parse();
     crate::logger::setup_logger()?;
     let config = Arc::new(RwLock::new(Config::init()?));
 
-    if let Some(addr) = cli.serve {
-        return serve::run(config, addr).await;
-    } else {
-        error!("Use the --serve flag to start the server");
-    }
-    Ok(())
+    return serve::run(config, args.port).await;
 }
