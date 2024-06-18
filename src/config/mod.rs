@@ -10,8 +10,8 @@ use crate::client::{
 };
 use crate::function::{Function, ToolCallResult};
 use crate::utils::{
-    format_option_value, fuzzy_match, get_env_name, light_theme_from_colorfgbg, now, 
-    set_text, AbortSignal, IS_STDOUT_TERMINAL,
+    format_option_value, get_env_name, now, 
+    set_text, 
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -19,7 +19,7 @@ use inquire::{Confirm, Select};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::{
     env,
     fs::{create_dir_all, read_dir, read_to_string, remove_file, File, OpenOptions},
@@ -28,17 +28,9 @@ use std::{
     process::exit,
     sync::Arc,
 };
-use syntect::highlighting::ThemeSet;
-
-/// Monokai Extended
-const DARK_THEME: &[u8] = include_bytes!("../../assets/monokai-extended.theme.bin");
-const LIGHT_THEME: &[u8] = include_bytes!("../../assets/monokai-extended-light.theme.bin");
-
 const CONFIG_FILE_NAME: &str = "config.yaml";
-const ROLES_FILE_NAME: &str = "roles.yaml";
 const MESSAGES_FILE_NAME: &str = "messages.md";
 const SESSIONS_DIR_NAME: &str = "sessions";
-const RAGS_DIR_NAME: &str = "rags";
 const FUNCTIONS_DIR_NAME: &str = "functions";
 
 const CLIENTS_FIELD: &str = "clients";
@@ -70,9 +62,7 @@ pub struct Config {
     pub save: bool,
     pub save_session: Option<bool>,
     pub highlight: bool,
-    pub light_theme: bool,
     pub wrap: Option<String>,
-    pub wrap_code: bool,
     pub auto_copy: bool,
     pub keybindings: Keybindings,
     pub prelude: Option<String>,
@@ -109,9 +99,7 @@ impl Default for Config {
             save_session: None,
             highlight: true,
             dry_run: false,
-            light_theme: false,
             wrap: None,
-            wrap_code: false,
             auto_copy: false,
             keybindings: Default::default(),
             prelude: None,
@@ -161,7 +149,6 @@ impl Config {
 
         config.setup_model()?;
         config.setup_highlight();
-        config.setup_light_theme()?;
 
         Ok(config)
     }
@@ -255,13 +242,6 @@ impl Config {
         }
     }
 
-    pub fn roles_file() -> Result<PathBuf> {
-        match env::var(get_env_name("roles_file")) {
-            Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Self::local_path(ROLES_FILE_NAME),
-        }
-    }
-
     pub fn messages_file() -> Result<PathBuf> {
         match env::var(get_env_name("messages_file")) {
             Ok(value) => Ok(PathBuf::from(value)),
@@ -276,13 +256,6 @@ impl Config {
         }
     }
 
-    pub fn rags_dir() -> Result<PathBuf> {
-        match env::var(get_env_name("rags_dir")) {
-            Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Self::local_path(RAGS_DIR_NAME),
-        }
-    }
-
     pub fn functions_dir() -> Result<PathBuf> {
         match env::var(get_env_name("functions_dir")) {
             Ok(value) => Ok(PathBuf::from(value)),
@@ -293,12 +266,6 @@ impl Config {
     pub fn session_file(name: &str) -> Result<PathBuf> {
         let mut path = Self::sessions_dir()?;
         path.push(&format!("{name}.yaml"));
-        Ok(path)
-    }
-
-    pub fn rag_file(name: &str) -> Result<PathBuf> {
-        let mut path = Self::rags_dir()?;
-        path.push(&format!("{name}.bin"));
         Ok(path)
     }
 
@@ -412,17 +379,13 @@ impl Config {
             ("save", self.save.to_string()),
             ("save_session", format_option_value(&self.save_session)),
             ("highlight", self.highlight.to_string()),
-            ("light_theme", self.light_theme.to_string()),
             ("wrap", wrap),
-            ("wrap_code", self.wrap_code.to_string()),
             ("auto_copy", self.auto_copy.to_string()),
             ("keybindings", self.keybindings.stringify().into()),
             ("prelude", format_option_value(&self.prelude)),
             ("config_file", display_path(&Self::config_file()?)),
-            ("roles_file", display_path(&Self::roles_file()?)),
             ("messages_file", display_path(&Self::messages_file()?)),
             ("sessions_dir", display_path(&Self::sessions_dir()?)),
-            ("rags_dir", display_path(&Self::rags_dir()?)),
             ("functions_dir", display_path(&Self::functions_dir()?)),
         ];
         let output = items
@@ -786,21 +749,6 @@ impl Config {
                 self.highlight = false;
             }
         }
-    }
-
-    fn setup_light_theme(&mut self) -> Result<()> {
-        if self.light_theme {
-            return Ok(());
-        }
-        if let Ok(value) = env::var(get_env_name("light_theme")) {
-            set_bool(&mut self.light_theme, &value);
-            return Ok(());
-        } else if let Ok(value) = env::var("COLORFGBG") {
-            if let Some(light) = light_theme_from_colorfgbg(&value) {
-                self.light_theme = light
-            }
-        };
-        Ok(())
     }
 }
 
