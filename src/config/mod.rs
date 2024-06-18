@@ -145,6 +145,8 @@ impl Config {
         if !config_path.exists() {
             create_config_file(&config_path)?;
         }
+
+        log::debug!("Loading config from {}", config_path.display());
         let mut config = if platform.is_some() {
             Self::load_config_env(&platform.unwrap())?
         } else {
