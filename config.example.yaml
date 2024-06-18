@@ -4,8 +4,6 @@ top_p: null                      # Set default top-p parameter
 save: true                       # Indicates whether to persist the message
 save_session: null               # Controls the persistence of the session, if null, asking the user
 auto_copy: false                 # Enables or disables automatic copying the last LLM response to the clipboard 
-keybindings: emacs               # Choose keybinding style (emacs, vi)
-prelude: null                    # Set a default role or session to start with (role:<name>, session:<name>)
 
 # Command that will be used to edit the current line buffer with ctrl+o
 # if unset fallback to $EDITOR and $VISUAL

@@ -62,7 +62,6 @@ pub struct Config {
     pub save: bool,
     pub save_session: Option<bool>,
     pub auto_copy: bool,
-    pub prelude: Option<String>,
     pub buffer_editor: Option<String>,
     pub embedding_model: Option<String>,
     pub rag_top_k: usize,
@@ -94,7 +93,6 @@ impl Default for Config {
             save_session: None,
             dry_run: false,
             auto_copy: false,
-            prelude: None,
             buffer_editor: None,
             embedding_model: None,
             rag_top_k: 4,
@@ -137,25 +135,6 @@ impl Config {
         config.setup_model()?;
 
         Ok(config)
-    }
-
-    pub fn apply_prelude(&mut self) -> Result<()> {
-        let prelude = self.prelude.clone().unwrap_or_default();
-        if prelude.is_empty() {
-            return Ok(());
-        }
-        let err_msg = || format!("Invalid prelude '{}", prelude);
-        match prelude.split_once(':') {
-            Some(("session", name)) => {
-                if self.session.is_none() {
-                    self.use_session(Some(name)).with_context(err_msg)?;
-                }
-            }
-            _ => {
-                bail!("{}", err_msg())
-            }
-        }
-        Ok(())
     }
 
     pub fn buffer_editor(&self) -> Option<String> {
@@ -347,7 +326,6 @@ impl Config {
             ("save", self.save.to_string()),
             ("save_session", format_option_value(&self.save_session)),
             ("auto_copy", self.auto_copy.to_string()),
-            ("prelude", format_option_value(&self.prelude)),
             ("config_file", display_path(&Self::config_file()?)),
             ("messages_file", display_path(&Self::messages_file()?)),
             ("sessions_dir", display_path(&Self::sessions_dir()?)),
@@ -478,9 +456,8 @@ impl Config {
 
     pub fn exit_session(&mut self) -> Result<()> {
         if let Some(mut session) = self.session.take() {
-            let is_repl = self.working_mode == WorkingMode::Repl;
             let sessions_dir = Self::sessions_dir()?;
-            session.exit(&sessions_dir, is_repl)?;
+            session.exit(&sessions_dir, false)?;
             self.last_message = None;
             self.restore_model()?;
         }
