@@ -43,6 +43,7 @@ impl Model {
 
     pub fn find(models: &[&Self], value: &str) -> Option<Self> {
         let mut model = None;
+        log::debug!("Finding model: {}", value);
         let (client_name, model_name) = match value.split_once(':') {
             Some((client_name, model_name)) => {
                 if model_name.is_empty() {
@@ -53,9 +54,13 @@ impl Model {
             }
             None => (value, None),
         };
+        log::debug!("client_name: {}, model_name: {:?}", client_name, model_name);
         match model_name {
             Some(model_name) => {
-                if let Some(found) = models.iter().find(|v| v.id() == value) {
+                if let Some(found) = models.iter().find(|v| {
+                    log::debug!("v.id(): {}, value: {}", v.id(), value);
+                    v.id() == value
+                }) {
                     model = Some((*found).clone());
                 } else if let Some(found) = models.iter().find(|v| v.client_name == client_name) {
                     let mut found = (*found).clone();
@@ -69,6 +74,7 @@ impl Model {
                 }
             }
         }
+        log::debug!("Found model: {:?}", model);
         model
     }
 

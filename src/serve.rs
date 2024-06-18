@@ -30,17 +30,9 @@ const DEFAULT_MODEL_NAME: &str = "default";
 
 type AppResponse = Response<BoxBody<Bytes, Infallible>>;
 
-pub async fn run(config: GlobalConfig, addr: Option<String>) -> Result<()> {
+pub async fn run(config: GlobalConfig, addr: Option<u16>) -> Result<()> {
     let addr = match addr {
-        Some(addr) => {
-            if let Ok(port) = addr.parse::<u16>() {
-                format!("127.0.0.1:{port}")
-            } else if let Ok(ip) = addr.parse::<IpAddr>() {
-                format!("{ip}:8000")
-            } else {
-                addr
-            }
-        }
+        Some(port) =>   format!("127.0.0.1:{port}"),
         None => DEFAULT_ADDRESS.to_string(),
     };
     let server = Arc::new(Server::new(&config));
@@ -200,6 +192,9 @@ impl Server {
             stream,
         } = req_body;
 
+        log::debug!(
+            "Chat completion request: model={model}, messages={messages:?}, temperature={temperature:?}, top_p={top_p:?}, max_tokens={max_tokens:?}, stream={stream}"
+        );
         let config = Config {
             clients: self.clients.to_vec(),
             model: self.model.clone(),
@@ -215,6 +210,7 @@ impl Server {
             (model, true)
         };
 
+        log::debug!("Model name: {}", model_name);
         if change {
             config.write().set_model(&model_name)?;
         }
