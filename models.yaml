@@ -84,6 +84,14 @@
   # notes:
   #   - get max_output_tokens info from list models api
   models:
+    - name: gemini-1.5-pro-latest
+      max_input_tokens: 1048576
+      max_output_tokens: 8192
+      input_price: 3.5
+      output_price: 10.5
+      supports_vision: true
+      supports_function_calling: true
+
     - name: gemini-1.0-pro-latest
       max_input_tokens: 30720
       max_output_tokens: 2048
@@ -122,6 +130,15 @@
   # notes:
   #   - get max_output_tokens info from models doc
   models:
+    - name: claude-3-5-sonnet-20240620
+      max_input_tokens: 200000
+      max_output_tokens: 4096
+      require_max_tokens: true
+      input_price: 3
+      output_price: 15
+      supports_vision: true
+      supports_function_calling: true
+
     - name: claude-3-opus-20240229
       max_input_tokens: 200000
       max_output_tokens: 4096
