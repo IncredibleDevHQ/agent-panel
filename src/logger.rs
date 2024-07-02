@@ -5,16 +5,14 @@ use simplelog::{format_description, Config as LogConfig, ConfigBuilder};
 #[cfg(debug_assertions)]
 pub fn setup_logger() -> Result<()> {
     let config = build_config();
-        simplelog::SimpleLogger::init(LevelFilter::Debug, config)?;
+    simplelog::SimpleLogger::init(LevelFilter::Debug, config)?;
     Ok(())
 }
 
 #[cfg(not(debug_assertions))]
-pub fn setup_logger(working_mode: WorkingMode) -> Result<()> {
+pub fn setup_logger() -> Result<()> {
     let config = build_config();
-    if working_mode == WorkingMode::Serve {
-        simplelog::SimpleLogger::init(log::LevelFilter::Info, config)?;
-    }
+    simplelog::SimpleLogger::init(log::LevelFilter::Info, config)?;
     Ok(())
 }
 
