@@ -1,9 +1,5 @@
-model: openai:gpt-3.5-turbo      # Specify the language model to use
 temperature: null                # Set default temperature parameter
 top_p: null                      # Set default top-p parameter
-save: true                       # Indicates whether to persist the message
-save_session: null               # Controls the persistence of the session, if null, asking the user
-
 clients:
   # All clients have the following configuration:
   # - type: xxxx
