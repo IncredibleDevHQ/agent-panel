@@ -25,7 +25,8 @@ pub fn now() -> String {
 
 pub fn get_env_name(key: &str) -> String {
     format!(
-        "{}",
+        "{}_{}",
+        env!("CARGO_CRATE_NAME").to_ascii_uppercase(),
         key.to_ascii_uppercase(),
     )
 }
